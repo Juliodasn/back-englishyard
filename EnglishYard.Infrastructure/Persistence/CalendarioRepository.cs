@@ -47,10 +47,12 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                         when 'cancelada' then 'Aula cancelada'
                         else null
                     end as resultado,
-                    false as eh_reposicao
+                    false as eh_reposicao,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.horarios_recorrentes_alunos h
-                join public.alunos a on a.id = h.aluno_id and a.ativo = true
-                join public.professoras p on p.id = h.professora_id and p.ativo = true
+                join public.alunos a on a.id = h.aluno_id
+                join public.professoras p on p.id = h.professora_id
                 join dias d on extract(dow from d.data)::smallint = h.dia_semana
                 left join lateral (
                     select
@@ -73,7 +75,11 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     order by au.atualizado_em desc
                     limit 1
                 ) real on true
-                where h.ativo = true
+                where (h.ativo = true or d.data < current_date)
+                  and (a.ativo = true or d.data < current_date)
+                  and (p.ativo = true or d.data < current_date)
+                  and (a.status in ('Ativo','Experimental','Inadimplente') or d.data < current_date)
+                  and (p.status = 'Ativa' or d.data < current_date)
                   and (@professora_id is null or p.id = @professora_id)
                   and h.data_inicio <= d.data
                   and (h.data_fim is null or h.data_fim >= d.data)
@@ -106,14 +112,16 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                         when 'cancelada' then 'Aula cancelada'
                         else 'Aula avulsa'
                     end as resultado,
-                    false as eh_reposicao
+                    false as eh_reposicao,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.aulas au
                 join public.aula_alunos aa on aa.aula_id = au.id
                 left join public.reposicoes r
                   on r.aula_origem_id = au.id
                  and r.aluno_id = aa.aluno_id
-                join public.alunos a on a.id = aa.aluno_id and a.ativo = true
-                join public.professoras p on p.id = au.professora_id and p.ativo = true
+                join public.alunos a on a.id = aa.aluno_id
+                join public.professoras p on p.id = au.professora_id
                 where au.eh_reposicao = false
                   and aa.horario_recorrente_aluno_id is null
                   and au.data_aula between @data_inicio and @data_fim
@@ -142,11 +150,13 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                         when 'perdida' then 'Falta do aluno'
                         else 'Reposição agendada'
                     end as resultado,
-                    true as eh_reposicao
+                    true as eh_reposicao,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.aulas au
                 join public.aula_alunos aa on aa.aula_id = au.id
-                join public.alunos a on a.id = aa.aluno_id and a.ativo = true
-                join public.professoras p on p.id = au.professora_id and p.ativo = true
+                join public.alunos a on a.id = aa.aluno_id
+                join public.professoras p on p.id = au.professora_id
                 join public.reposicoes r on r.id = au.reposicao_origem_id
                 where au.eh_reposicao = true
                   and au.status <> 'cancelada'
@@ -189,7 +199,9 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                 reader.GetString(11),
                 reader.GetBoolean(12),
                 reader.IsDBNull(13) ? null : reader.GetString(13),
-                reader.GetBoolean(14)));
+                reader.GetBoolean(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return aulas;
@@ -208,8 +220,10 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                 h.hora_fim,
                 a.id as aluno_id,
                 a.nome as aluno_nome,
+                a.foto_url as aluno_foto_url,
                 p.id as professora_id,
-                p.nome as professora_nome
+                p.nome as professora_nome,
+                p.foto_url as professora_foto_url
             from public.horarios_recorrentes_alunos h
             join public.alunos a
               on a.id = h.aluno_id
@@ -256,8 +270,10 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                 reader.GetFieldValue<TimeOnly>(3),
                 reader.GetGuid(4),
                 reader.GetString(5),
-                reader.GetGuid(6),
-                reader.GetString(7)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.GetGuid(7),
+                reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9)));
         }
 
         return horarios;

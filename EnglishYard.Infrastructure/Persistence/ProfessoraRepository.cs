@@ -689,6 +689,63 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
             : null;
     }
 
+    public async Task<IReadOnlyList<ProfessoraArquivadaResponse>> ListarArquivadasAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select id, nome, email, status, foto_url, data_desativacao
+            from public.professoras where ativo = false
+            order by data_desativacao desc nulls last, nome;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<ProfessoraArquivadaResponse>();
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), GetNullableString(reader, 4), reader.IsDBNull(5) ? null : reader.GetFieldValue<DateOnly>(5)));
+        return result;
+    }
+
+    public async Task<bool> RestaurarAsync(Guid professoraId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            update public.professoras set ativo = true, status = 'Pausada', data_desativacao = null, atualizado_em = now()
+            where id = @id and ativo = false returning id;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", professoraId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    public async Task AtualizarEmailAcessoAsync(Guid professoraId, string email, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await using (var teacher = new NpgsqlCommand("update public.professoras set email=@email, atualizado_em=now() where id=@id and ativo=true;", connection, transaction))
+            { teacher.Parameters.AddWithValue("id", professoraId); teacher.Parameters.AddWithValue("email", email); if (await teacher.ExecuteNonQueryAsync(cancellationToken) == 0) throw new InvalidOperationException("Professora não encontrada."); }
+            await using (var profile = new NpgsqlCommand("update public.perfis_usuarios set email=@email, atualizado_em=now() where professora_id=@id and ativo=true;", connection, transaction))
+            { profile.Parameters.AddWithValue("id", professoraId); profile.Parameters.AddWithValue("email", email); await profile.ExecuteNonQueryAsync(cancellationToken); }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch { await transaction.RollbackAsync(cancellationToken); throw; }
+    }
+
+    public async Task MarcarTrocaSenhaObrigatoriaAsync(Guid professoraId, CancellationToken cancellationToken)
+    {
+        const string sql = "update public.perfis_usuarios set deve_alterar_senha=true, atualizado_em=now() where professora_id=@id and ativo=true;";
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", professoraId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task RevogarSessoesAsync(Guid professoraId, CancellationToken cancellationToken)
+    {
+        const string sql = "update public.perfis_usuarios set sessoes_revogadas_antes_de=now(), atualizado_em=now() where professora_id=@id and ativo=true;";
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", professoraId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<bool> PossuiPerfilAcessoAtivoAsync(Guid professoraId, CancellationToken cancellationToken)
     {
         const string sql = """

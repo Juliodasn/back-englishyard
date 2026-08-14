@@ -20,6 +20,40 @@ public sealed class ProfessorasController(ProfessoraService service) : Controlle
     }
 
 
+    [HttpGet("arquivadas")]
+    public async Task<ActionResult<IReadOnlyList<ProfessoraArquivadaResponse>>> ListarArquivadas(CancellationToken cancellationToken) =>
+        Ok(await service.ListarArquivadasAsync(cancellationToken));
+
+    [HttpPost("{id:guid}/restaurar")]
+    public async Task<IActionResult> Restaurar(Guid id, CancellationToken cancellationToken) =>
+        await service.RestaurarAsync(id, cancellationToken) ? NoContent() : NotFound();
+
+    [HttpPost("{id:guid}/acesso/redefinir-senha")]
+    public async Task<IActionResult> RedefinirSenha(Guid id, [FromBody] RedefinirSenhaProfessoraRequest request, CancellationToken cancellationToken)
+    {
+        try { await service.RedefinirSenhaAsync(id, request, cancellationToken); return NoContent(); }
+        catch (ProfessoraValidationException ex) { return Problem(ex.Message, statusCode: 400, title: "Acesso inválido"); }
+        catch (SupabaseAuthException ex) { return Problem(ex.Message, statusCode: 502, title: "Falha no Auth"); }
+    }
+
+    [HttpPut("{id:guid}/acesso/email")]
+    public async Task<IActionResult> AlterarEmailAcesso(Guid id, [FromBody] AlterarEmailAcessoProfessoraRequest request, CancellationToken cancellationToken)
+    {
+        try { await service.AlterarEmailAcessoAsync(id, request, cancellationToken); return NoContent(); }
+        catch (ProfessoraValidationException ex) { return Problem(ex.Message, statusCode: 400, title: "Acesso inválido"); }
+        catch (ProfessoraConflitoException ex) { return Problem(ex.Message, statusCode: 409, title: "E-mail já utilizado"); }
+        catch (ProfessoraNaoEncontradaException ex) { return Problem(ex.Message, statusCode: 404, title: "Professora não encontrada"); }
+        catch (SupabaseAuthException ex) { return Problem(ex.Message, statusCode: 502, title: "Falha no Auth"); }
+    }
+
+    [HttpPost("{id:guid}/acesso/revogar-sessoes")]
+    public async Task<IActionResult> RevogarSessoes(Guid id, CancellationToken cancellationToken)
+    {
+        try { await service.RevogarSessoesAsync(id, cancellationToken); return NoContent(); }
+        catch (ProfessoraValidationException ex) { return Problem(ex.Message, statusCode: 400, title: "Acesso inválido"); }
+        catch (SupabaseAuthException ex) { return Problem(ex.Message, statusCode: 502, title: "Falha no Auth"); }
+    }
+
     [HttpGet("paginado")]
     [ProducesResponseType<ProfessoraListagemPaginadaResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]

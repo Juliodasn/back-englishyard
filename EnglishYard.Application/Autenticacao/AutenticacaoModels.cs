@@ -21,7 +21,8 @@ public sealed record PerfilUsuarioPortal(
     string? FotoUrl,
     bool Ativo,
     bool DeveAlterarSenha,
-    DateTimeOffset? UltimoAcessoEm);
+    DateTimeOffset? UltimoAcessoEm,
+    DateTimeOffset? SessoesRevogadasAntesDe = null);
 
 public sealed record PerfilUsuarioResponse(
     Guid UsuarioAuthId,

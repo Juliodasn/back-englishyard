@@ -295,7 +295,9 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
             item.Observacao,
             item.ReposicaoStatus,
             codigo != ResultadoAulaCodigos.Cancelada && temporal != "futura",
-            codigo != ResultadoAulaCodigos.Cancelada && !item.EhReposicao);
+            codigo != ResultadoAulaCodigos.Cancelada && !item.EhReposicao,
+            item.AlunoFotoUrl,
+            item.ProfessoraFotoUrl);
     }
 
     private static string MapStatusCode(string raw) => raw switch

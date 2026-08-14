@@ -111,6 +111,96 @@ public sealed class FinanceiroController(FinanceiroService service) : Controller
         return updated ? NoContent() : NotFound();
     }
 
+    [HttpPost("recebimentos/{recebimentoId:guid}/estornar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> EstornarRecebimento(Guid recebimentoId, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.EstornarRecebimentoAsync(recebimentoId, request.Motivo, id, ct));
+
+    [HttpPatch("mensalidades/{mensalidadeId:guid}/desconto")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> AjustarMensalidade(Guid mensalidadeId, AjustarMensalidadeRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.AjustarMensalidadeAsync(mensalidadeId, request, id, ct));
+
+    [HttpPost("mensalidades/{mensalidadeId:guid}/cancelar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> CancelarMensalidade(Guid mensalidadeId, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.CancelarMensalidadeAsync(mensalidadeId, request.Motivo, id, ct));
+
+    [HttpPut("despesas/{despesaId:guid}")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> AtualizarDespesa(Guid despesaId, AtualizarDespesaRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.AtualizarDespesaAsync(despesaId, request, id, ct));
+
+    [HttpPost("despesas/{despesaId:guid}/cancelar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> CancelarDespesa(Guid despesaId, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.CancelarDespesaAsync(despesaId, request.Motivo, id, ct));
+
+    [HttpPost("despesas/{despesaId:guid}/reabrir")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> ReabrirDespesa(Guid despesaId, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.ReabrirDespesaAsync(despesaId, request.Motivo, id, ct));
+
+    [HttpPost("professoras/{professoraId:guid}/ajustes")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> CriarAjuste(Guid professoraId, [FromQuery] string? competencia, CriarAjusteProfessoraRequest request, CancellationToken ct)
+    {
+        if (!TryGetAuthUserId(out var userId)) return Forbid();
+        try { return Ok(new { id = await service.CriarAjusteProfessoraAsync(professoraId, ParseCompetencia(competencia), request, userId, ct) }); }
+        catch (FinanceiroValidationException e) { return Problem(statusCode: 400, detail: e.Message); }
+        catch (FinanceiroConflitoException e) { return Problem(statusCode: 409, detail: e.Message); }
+    }
+
+    [HttpDelete("ajustes/{ajusteId:guid}")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> ExcluirAjuste(Guid ajusteId, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.ExcluirAjusteProfessoraAsync(ajusteId, id, ct));
+
+    [HttpPost("professoras/{professoraId:guid}/fechamentos/aprovar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> AprovarFechamento(Guid professoraId, [FromQuery] string? competencia, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.AprovarFechamentoAsync(professoraId, ParseCompetencia(competencia), id, ct));
+
+    [HttpPost("professoras/{professoraId:guid}/fechamentos/pagar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> PagarFechamento(Guid professoraId, [FromQuery] string? competencia, MarcarFechamentoPagoRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.MarcarFechamentoPagoAsync(professoraId, ParseCompetencia(competencia), request, id, ct));
+
+    [HttpPost("professoras/{professoraId:guid}/fechamentos/reabrir")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> ReabrirFechamento(Guid professoraId, [FromQuery] string? competencia, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.ReabrirFechamentoAsync(professoraId, ParseCompetencia(competencia), request.Motivo, id, ct));
+
+    [HttpGet("politica-pagamento")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<ActionResult<PoliticaPagamentoResponse>> ObterPolitica([FromQuery] DateOnly? data, CancellationToken ct)
+    {
+        var policy = await service.ObterPoliticaPagamentoAsync(data ?? DateOnly.FromDateTime(DateTime.Today), ct);
+        return policy is null ? NotFound() : Ok(policy);
+    }
+
+    [HttpPost("politica-pagamento")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<ActionResult<PoliticaPagamentoResponse>> SalvarPolitica(SalvarPoliticaPagamentoRequest request, CancellationToken ct)
+    {
+        if (!TryGetAuthUserId(out var userId)) return Forbid();
+        return Ok(await service.SalvarPoliticaPagamentoAsync(request, userId, ct));
+    }
+
+    private async Task<IActionResult> ExecuteAdminMutation(Func<Guid, Task<bool>> operation)
+    {
+        if (!TryGetAuthUserId(out var userId)) return Forbid();
+        try { return await operation(userId) ? NoContent() : NotFound(); }
+        catch (FinanceiroValidationException e) { return Problem(statusCode: 400, detail: e.Message); }
+        catch (FinanceiroConflitoException e) { return Problem(statusCode: 409, detail: e.Message); }
+    }
+
+    private bool TryGetAuthUserId(out Guid id)
+    {
+        var value = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(value, out id);
+    }
+
     private Guid? GetProfessoraId()
     {
         var value = User.FindFirstValue(PortalClaimTypes.ProfessoraId);

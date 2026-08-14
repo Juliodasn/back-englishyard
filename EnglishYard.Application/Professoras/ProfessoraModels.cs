@@ -109,6 +109,10 @@ public sealed record ValorAulaProfessoraHistoricoResponse(
     DateOnly? VigenteAte);
 
 public sealed record CriarAcessoProfessoraRequest(string SenhaInicial);
+public sealed record RedefinirSenhaProfessoraRequest(string NovaSenha);
+public sealed record AlterarEmailAcessoProfessoraRequest(string NovoEmail);
+public sealed record ProfessoraArquivadaResponse(
+    Guid Id, string Nome, string Email, string Status, string? FotoUrl, DateOnly? DataArquivamento);
 
 public sealed record ProfessoraListagemPaginadaResponse(
     IReadOnlyList<ProfessoraResponse> Itens,
@@ -126,4 +130,3 @@ public sealed record ProfessoraExportacaoResponse(
     decimal ValorAulaIndividual,
     decimal ValorAulaGrupo,
     string Status);
-

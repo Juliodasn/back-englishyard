@@ -21,6 +21,7 @@ public sealed class Aluno
     public decimal PercentualDesconto { get; init; }
     public string? Observacoes { get; init; }
     public string? FotoUrl { get; init; }
+    public DateOnly DataMatricula { get; init; }
     public bool Ativo { get; init; }
     public DateTimeOffset CriadoEm { get; init; }
     public DateTimeOffset AtualizadoEm { get; init; }

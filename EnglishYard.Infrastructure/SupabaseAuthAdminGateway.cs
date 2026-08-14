@@ -85,6 +85,35 @@ public sealed class SupabaseAuthAdminGateway(IConfiguration configuration) : ISu
             throw new SupabaseAuthException($"O Supabase Auth não conseguiu atualizar a senha ({(int)response.StatusCode}). {ExtractMessage(body)}");
     }
 
+    public Task RedefinirSenhaUsuarioAsync(Guid usuarioAuthId, string novaSenha, CancellationToken cancellationToken) =>
+        AtualizarUsuarioAdminAsync(usuarioAuthId, new { password = novaSenha }, cancellationToken);
+
+    public Task AlterarEmailUsuarioAsync(Guid usuarioAuthId, string novoEmail, CancellationToken cancellationToken) =>
+        AtualizarUsuarioAdminAsync(usuarioAuthId, new { email = novoEmail, email_confirm = true }, cancellationToken);
+
+    public async Task RevogarSessoesUsuarioAsync(Guid usuarioAuthId, CancellationToken cancellationToken)
+    {
+        var settings = GetSettings();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{settings.Url}/auth/v1/admin/users/{usuarioAuthId}/logout");
+        ConfigureHeaders(request, settings.ServiceRoleKey);
+        using var response = await SharedClient.SendAsync(request, cancellationToken);
+        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound) return;
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        throw new SupabaseAuthException($"Não foi possível revogar as sessões da professora ({(int)response.StatusCode}). {ExtractMessage(body)}");
+    }
+
+    private async Task AtualizarUsuarioAdminAsync(Guid usuarioAuthId, object payload, CancellationToken cancellationToken)
+    {
+        var settings = GetSettings();
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"{settings.Url}/auth/v1/admin/users/{usuarioAuthId}");
+        ConfigureHeaders(request, settings.ServiceRoleKey);
+        request.Content = JsonContent.Create(payload);
+        using var response = await SharedClient.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new SupabaseAuthException($"O Supabase Auth não conseguiu atualizar a conta ({(int)response.StatusCode}). {ExtractMessage(body)}");
+    }
+
     private (string Url, string PublishableKey) GetPublicSettings()
     {
         var url = configuration["Supabase:Url"]?.TrimEnd('/');

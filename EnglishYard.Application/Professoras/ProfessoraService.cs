@@ -263,6 +263,40 @@ public sealed class ProfessoraService(
         }
     }
 
+    public Task<IReadOnlyList<ProfessoraArquivadaResponse>> ListarArquivadasAsync(CancellationToken cancellationToken) => repository.ListarArquivadasAsync(cancellationToken);
+    public Task<bool> RestaurarAsync(Guid professoraId, CancellationToken cancellationToken) => repository.RestaurarAsync(professoraId, cancellationToken);
+
+    public async Task RedefinirSenhaAsync(Guid professoraId, RedefinirSenhaProfessoraRequest request, CancellationToken cancellationToken)
+    {
+        var novaSenha = request.NovaSenha ?? string.Empty;
+        var error = SenhaPortalValidator.ObterErro(novaSenha);
+        if (error is not null) throw new ProfessoraValidationException(error);
+        var authId = await repository.ObterUsuarioAuthIdAsync(professoraId, cancellationToken) ?? throw new ProfessoraValidationException("A professora ainda não possui acesso ao portal.");
+        await authAdminGateway.RedefinirSenhaUsuarioAsync(authId, novaSenha, cancellationToken);
+        await repository.MarcarTrocaSenhaObrigatoriaAsync(professoraId, cancellationToken);
+        await repository.RevogarSessoesAsync(professoraId, cancellationToken);
+    }
+
+    public async Task AlterarEmailAcessoAsync(Guid professoraId, AlterarEmailAcessoProfessoraRequest request, CancellationToken cancellationToken)
+    {
+        var novoEmail = request.NovoEmail?.Trim().ToLowerInvariant() ?? string.Empty;
+        if (!novoEmail.Contains('@')) throw new ProfessoraValidationException("Informe um e-mail de acesso válido.");
+        var dados = await repository.ObterDadosParaAcessoAsync(professoraId, cancellationToken) ?? throw new ProfessoraNaoEncontradaException("Professora não encontrada ou inativa.");
+        if (string.Equals(dados.Email, novoEmail, StringComparison.OrdinalIgnoreCase)) return;
+        if (await repository.EmailExisteAsync(novoEmail, cancellationToken)) throw new ProfessoraConflitoException("Este e-mail já pertence a outra professora ativa.");
+        var authId = await repository.ObterUsuarioAuthIdAsync(professoraId, cancellationToken) ?? throw new ProfessoraValidationException("A professora ainda não possui acesso ao portal.");
+        await authAdminGateway.AlterarEmailUsuarioAsync(authId, novoEmail, cancellationToken);
+        try { await repository.AtualizarEmailAcessoAsync(professoraId, novoEmail, cancellationToken); }
+        catch { try { await authAdminGateway.AlterarEmailUsuarioAsync(authId, dados.Email, cancellationToken); } catch { } throw; }
+        await repository.RevogarSessoesAsync(professoraId, cancellationToken);
+    }
+
+    public async Task RevogarSessoesAsync(Guid professoraId, CancellationToken cancellationToken)
+    {
+        var authId = await repository.ObterUsuarioAuthIdAsync(professoraId, cancellationToken) ?? throw new ProfessoraValidationException("A professora ainda não possui acesso ao portal.");
+        await repository.RevogarSessoesAsync(professoraId, cancellationToken);
+    }
+
     private static CadastrarProfessoraRequest Normalize(CadastrarProfessoraRequest request) => request with
     {
         Nome = request.Nome.Trim(),

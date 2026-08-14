@@ -18,7 +18,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 case when @professora_id is not null then agenda.professora_foto_url else coalesce(agenda.professora_foto_url, p.foto_url) end as professora_foto_url,
                 a.valor_mensalidade, a.dia_vencimento, a.forma_pagamento,
                 a.taxa_matricula, a.percentual_desconto,
-                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em
+                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em, a.data_matricula
             from public.alunos a
             left join public.professoras p on p.id = a.professora_id
             left join lateral (
@@ -94,7 +94,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 case when @professora_acesso_id is not null then agenda_acesso.professora_foto_url else coalesce(agenda.professora_foto_url, p.foto_url) end as professora_foto_url,
                 a.valor_mensalidade, a.dia_vencimento, a.forma_pagamento,
                 a.taxa_matricula, a.percentual_desconto,
-                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em,
+                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em, a.data_matricula,
                 count(*) over()::int as total_count
             from public.alunos a
             left join public.professoras p on p.id = a.professora_id
@@ -215,7 +215,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
         while (await reader.ReadAsync(cancellationToken))
         {
             alunos.Add(MapAluno(reader));
-            total = reader.GetInt32(22);
+            total = reader.GetInt32(23);
         }
 
         return (alunos, total);
@@ -480,12 +480,12 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     nome, data_nascimento, genero, email, telefone,
                     responsavel_nome, responsavel_telefone, status, professora_id,
                     valor_mensalidade, dia_vencimento, forma_pagamento,
-                    taxa_matricula, percentual_desconto, observacoes, ativo
+                    taxa_matricula, percentual_desconto, observacoes, data_matricula, ativo
                 ) values (
                     @nome, @data_nascimento, @genero, @email, @telefone,
                     @responsavel_nome, @responsavel_telefone, @status, @professora_id,
                     @valor_mensalidade, @dia_vencimento, @forma_pagamento,
-                    @taxa_matricula, @percentual_desconto, @observacoes, true
+                    @taxa_matricula, @percentual_desconto, @observacoes, @data_matricula, true
                 )
                 returning id;
                 """;
@@ -507,6 +507,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 AddParameter(insert, "taxa_matricula", request.TaxaMatricula, NpgsqlDbType.Numeric);
                 AddParameter(insert, "percentual_desconto", request.PercentualDesconto, NpgsqlDbType.Numeric);
                 AddParameter(insert, "observacoes", request.Observacoes);
+                AddParameter(insert, "data_matricula", request.DataMatricula ?? DateOnly.FromDateTime(DateTime.Today), NpgsqlDbType.Date);
 
                 alunoId = (Guid)(await insert.ExecuteScalarAsync(cancellationToken)
                     ?? throw new InvalidOperationException("O banco não retornou o identificador do aluno."));
@@ -550,15 +551,16 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             transaction);
         var hoje = (DateOnly)(await todayCommand.ExecuteScalarAsync(cancellationToken)
             ?? throw new InvalidOperationException("Não foi possível determinar a data atual da escola."));
-        var competencia = new DateOnly(hoje.Year, hoje.Month, 1);
+        var dataMatricula = request.DataMatricula ?? hoje;
+        var competencia = new DateOnly(dataMatricula.Year, dataMatricula.Month, 1);
         var descontoMensalidade = Math.Round(
             mensalidade * Math.Max(0m, request.PercentualDesconto) / 100m,
             2,
             MidpointRounding.AwayFromZero);
         var valorOriginal = mensalidade + taxaMatricula;
         var valorFinal = Math.Max(0m, mensalidade - descontoMensalidade) + taxaMatricula;
-        var diaVencimento = Math.Clamp((int)(request.DiaVencimento ?? 10), 1, DateTime.DaysInMonth(hoje.Year, hoje.Month));
-        var vencimento = new DateOnly(hoje.Year, hoje.Month, diaVencimento);
+        var diaVencimento = Math.Clamp((int)(request.DiaVencimento ?? 10), 1, DateTime.DaysInMonth(dataMatricula.Year, dataMatricula.Month));
+        var vencimento = new DateOnly(dataMatricula.Year, dataMatricula.Month, diaVencimento);
         var descricao = mensalidade > 0m && taxaMatricula > 0m
             ? "Mensalidade + taxa de matrícula"
             : taxaMatricula > 0m ? "Taxa de matrícula" : "Mensalidade";
@@ -617,6 +619,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     taxa_matricula = @taxa_matricula,
                     percentual_desconto = @percentual_desconto,
                     observacoes = @observacoes,
+                    data_matricula = coalesce(@data_matricula, data_matricula),
                     atualizado_em = now()
                 where id = @id and ativo = true;
                 """;
@@ -638,6 +641,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 AddParameter(command, "taxa_matricula", request.TaxaMatricula, NpgsqlDbType.Numeric);
                 AddParameter(command, "percentual_desconto", request.PercentualDesconto, NpgsqlDbType.Numeric);
                 AddParameter(command, "observacoes", request.Observacoes);
+                AddParameter(command, "data_matricula", request.DataMatricula, NpgsqlDbType.Date);
 
                 if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
                 {
@@ -755,6 +759,32 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
         }
     }
 
+    public async Task<IReadOnlyList<AlunoArquivadoResponse>> ListarArquivadosAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select id, nome, email, status, foto_url, data_desativacao
+            from public.alunos where ativo = false
+            order by data_desativacao desc nulls last, nome;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<AlunoArquivadoResponse>();
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new(reader.GetGuid(0), reader.GetString(1), GetNullableString(reader, 2), reader.GetString(3), GetNullableString(reader, 4), reader.IsDBNull(5) ? null : reader.GetFieldValue<DateOnly>(5)));
+        return result;
+    }
+
+    public async Task<bool> RestaurarAsync(Guid alunoId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            update public.alunos set ativo = true, data_desativacao = null, atualizado_em = now()
+            where id = @id and ativo = false returning id;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", alunoId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
     public async Task<bool> EmailExisteAsync(string email, Guid? ignorarAlunoId, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -813,7 +843,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 coalesce(agenda.professora_foto_url, p.foto_url) as professora_foto_url,
                 a.valor_mensalidade, a.dia_vencimento, a.forma_pagamento,
                 a.taxa_matricula, a.percentual_desconto,
-                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em
+                a.observacoes, a.foto_url, a.ativo, a.criado_em, a.atualizado_em, a.data_matricula
             from public.alunos a
             left join public.professoras p on p.id = a.professora_id
             left join lateral (
@@ -1064,7 +1094,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
         FotoUrl = GetNullableString(reader, 18),
         Ativo = reader.GetBoolean(19),
         CriadoEm = reader.GetFieldValue<DateTimeOffset>(20),
-        AtualizadoEm = reader.GetFieldValue<DateTimeOffset>(21)
+        AtualizadoEm = reader.GetFieldValue<DateTimeOffset>(21),
+        DataMatricula = reader.GetFieldValue<DateOnly>(22)
     };
 
     private static string? GetNullableString(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);

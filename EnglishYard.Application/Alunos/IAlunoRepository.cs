@@ -34,6 +34,8 @@ public interface IAlunoRepository
     Task<Aluno> CadastrarAsync(CadastrarAlunoRequest request, CancellationToken cancellationToken);
     Task<Aluno?> AtualizarAsync(Guid alunoId, AtualizarAlunoRequest request, CancellationToken cancellationToken);
     Task<bool> ExcluirAsync(Guid alunoId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AlunoArquivadoResponse>> ListarArquivadosAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<AlunoArquivadoResponse>>([]);
+    Task<bool> RestaurarAsync(Guid alunoId, CancellationToken cancellationToken) => Task.FromResult(false);
     Task<bool> AtualizarFotoUrlAsync(Guid alunoId, string fotoUrl, CancellationToken cancellationToken);
     Task<bool> EmailExisteAsync(string email, Guid? ignorarAlunoId, CancellationToken cancellationToken);
     Task<bool> ProfessoraExisteAsync(Guid professoraId, CancellationToken cancellationToken);

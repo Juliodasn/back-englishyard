@@ -35,10 +35,12 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     coalesce(real.elegivel_pagamento, false) as elegivel_pagamento,
                     coalesce(real.valor_pagamento, 0)::numeric as valor_pagamento,
                     coalesce(real.participante_observacao, real.aula_observacao) as observacao,
-                    real.reposicao_status
+                    real.reposicao_status,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.horarios_recorrentes_alunos h
-                join public.alunos a on a.id = h.aluno_id and a.ativo = true
-                join public.professoras p on p.id = h.professora_id and p.ativo = true
+                join public.alunos a on a.id = h.aluno_id
+                join public.professoras p on p.id = h.professora_id
                 left join lateral (
                     select
                         au.id as aula_id,
@@ -63,7 +65,11 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     order by au.atualizado_em desc
                     limit 1
                 ) real on true
-                where h.ativo = true
+                where (h.ativo = true or @data < current_date)
+                  and (a.ativo = true or @data < current_date)
+                  and (p.ativo = true or @data < current_date)
+                  and (a.status in ('Ativo','Experimental','Inadimplente') or @data < current_date)
+                  and (p.status = 'Ativa' or @data < current_date)
                   and extract(dow from @data::date)::smallint = h.dia_semana
                   and h.data_inicio <= @data
                   and (h.data_fim is null or h.data_fim >= @data)
@@ -88,14 +94,16 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     au.elegivel_pagamento,
                     au.valor_pagamento,
                     coalesce(aa.observacoes, au.observacoes) as observacao,
-                    r.status as reposicao_status
+                    r.status as reposicao_status,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.aulas au
                 join public.aula_alunos aa on aa.aula_id = au.id
                 left join public.reposicoes r
                   on r.aula_origem_id = au.id
                  and r.aluno_id = aa.aluno_id
-                join public.alunos a on a.id = aa.aluno_id and a.ativo = true
-                join public.professoras p on p.id = au.professora_id and p.ativo = true
+                join public.alunos a on a.id = aa.aluno_id
+                join public.professoras p on p.id = au.professora_id
                 where au.eh_reposicao = false
                   and aa.horario_recorrente_aluno_id is null
                   and au.data_aula = @data
@@ -120,11 +128,13 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     au.elegivel_pagamento,
                     au.valor_pagamento,
                     coalesce(aa.observacoes, au.observacoes) as observacao,
-                    r.status as reposicao_status
+                    r.status as reposicao_status,
+                    a.foto_url as aluno_foto_url,
+                    p.foto_url as professora_foto_url
                 from public.aulas au
                 join public.aula_alunos aa on aa.aula_id = au.id
-                join public.alunos a on a.id = aa.aluno_id and a.ativo = true
-                join public.professoras p on p.id = au.professora_id and p.ativo = true
+                join public.alunos a on a.id = aa.aluno_id
+                join public.professoras p on p.id = au.professora_id
                 join public.reposicoes r on r.id = au.reposicao_origem_id
                 where au.eh_reposicao = true
                   and au.status <> 'cancelada'
@@ -724,8 +734,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 r.aula_origem_id,
                 r.aluno_id,
                 al.nome,
+                al.foto_url,
                 origem.professora_id,
                 po.nome,
+                po.foto_url,
                 r.motivo,
                 r.status,
                 origem.data_aula,
@@ -737,6 +749,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 r.hora_fim,
                 r.professora_agendada_id,
                 pa.nome,
+                pa.foto_url,
                 r.observacao_agendamento,
                 reposicao_aula.id,
                 r.criado_em,
@@ -803,6 +816,38 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
 
             if (!await TeacherExistsAsync(connection, transaction, request.ProfessoraId, cancellationToken))
                 throw new RegistroAulaValidationException("A professora escolhida para a reposição não está ativa.");
+
+            // Serialize scheduling decisions for this teacher/student/day. Without the
+            // transaction-scoped locks, two concurrent requests could both pass the
+            // overlap query and then insert conflicting lessons.
+            await AcquireScheduleLocksAsync(
+                connection,
+                transaction,
+                request.ProfessoraId,
+                origin.AlunoId,
+                request.Data,
+                cancellationToken);
+
+            var existingReplacementLessonId = await GetReplacementLessonIdAsync(
+                connection,
+                transaction,
+                reposicaoId,
+                cancellationToken);
+            if (await ExisteConflitoNovaAulaAsync(
+                    connection,
+                    transaction,
+                    request.ProfessoraId,
+                    origin.AlunoId,
+                    request.Data,
+                    request.HoraInicio,
+                    request.HoraFim,
+                    cancellationToken,
+                    existingReplacementLessonId))
+            {
+                throw new RegistroAulaConflictException(
+                    $"Já existe uma aula do aluno ou da professora que conflita com " +
+                    $"{request.HoraInicio:HH:mm}–{request.HoraFim:HH:mm} nessa data.");
+            }
 
             const string updateSql = """
                 update public.reposicoes
@@ -984,30 +1029,35 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         reader.GetBoolean(15),
         reader.GetDecimal(16),
         GetNullableString(reader, 17),
-        GetNullableString(reader, 18));
+        GetNullableString(reader, 18),
+        GetNullableString(reader, 19),
+        GetNullableString(reader, 20));
 
     private static ReposicaoResponse MapReposicao(NpgsqlDataReader reader) => new(
         reader.GetGuid(0),
         reader.GetGuid(1),
         reader.GetGuid(2),
         reader.GetString(3),
-        reader.GetGuid(4),
-        reader.GetString(5),
+        GetNullableString(reader, 4),
+        reader.GetGuid(5),
         reader.GetString(6),
-        reader.GetString(7),
-        reader.GetFieldValue<DateOnly>(8),
-        reader.GetFieldValue<TimeOnly>(9),
-        reader.GetFieldValue<TimeOnly>(10),
-        GetNullableString(reader, 11),
-        reader.IsDBNull(12) ? null : reader.GetFieldValue<DateOnly>(12),
-        reader.IsDBNull(13) ? null : reader.GetFieldValue<TimeOnly>(13),
-        reader.IsDBNull(14) ? null : reader.GetFieldValue<TimeOnly>(14),
-        reader.IsDBNull(15) ? null : reader.GetGuid(15),
-        GetNullableString(reader, 16),
-        GetNullableString(reader, 17),
-        reader.IsDBNull(18) ? null : reader.GetGuid(18),
-        reader.GetFieldValue<DateTimeOffset>(19),
-        reader.IsDBNull(20) ? null : reader.GetFieldValue<DateTimeOffset>(20));
+        GetNullableString(reader, 7),
+        reader.GetString(8),
+        reader.GetString(9),
+        reader.GetFieldValue<DateOnly>(10),
+        reader.GetFieldValue<TimeOnly>(11),
+        reader.GetFieldValue<TimeOnly>(12),
+        GetNullableString(reader, 13),
+        reader.IsDBNull(14) ? null : reader.GetFieldValue<DateOnly>(14),
+        reader.IsDBNull(15) ? null : reader.GetFieldValue<TimeOnly>(15),
+        reader.IsDBNull(16) ? null : reader.GetFieldValue<TimeOnly>(16),
+        reader.IsDBNull(17) ? null : reader.GetGuid(17),
+        GetNullableString(reader, 18),
+        GetNullableString(reader, 19),
+        GetNullableString(reader, 20),
+        reader.IsDBNull(21) ? null : reader.GetGuid(21),
+        reader.GetFieldValue<DateTimeOffset>(22),
+        reader.IsDBNull(23) ? null : reader.GetFieldValue<DateTimeOffset>(23));
 
     private static async Task<bool> ExisteConflitoNovaAulaAsync(
         NpgsqlConnection connection,
@@ -1017,7 +1067,8 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         DateOnly data,
         TimeOnly horaInicio,
         TimeOnly horaFim,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? ignorarAulaId = null)
     {
         const string sql = """
             with agenda_recorrente as (
@@ -1075,6 +1126,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     from public.aulas au
                     join public.aula_alunos aa on aa.aula_id = au.id
                     where au.data_aula = @data
+                      and au.id <> coalesce(@ignorar_aula_id, '00000000-0000-0000-0000-000000000000'::uuid)
                       and au.status not in ('cancelada', 'remarcada')
                       and aa.status not in ('cancelada', 'remarcada_aluno', 'remarcada_professora')
                       and (au.professora_id = @professora_id or aa.aluno_id = @aluno_id)
@@ -1089,7 +1141,34 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         command.Parameters.AddWithValue("data", NpgsqlDbType.Date, data);
         command.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, horaInicio);
         command.Parameters.AddWithValue("fim", NpgsqlDbType.Time, horaFim);
+        command.Parameters.Add(new NpgsqlParameter("ignorar_aula_id", NpgsqlDbType.Uuid)
+        {
+            Value = ignorarAulaId.HasValue ? ignorarAulaId.Value : DBNull.Value
+        });
         return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken) ?? false);
+    }
+
+    private static async Task AcquireScheduleLocksAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid professoraId,
+        Guid alunoId,
+        DateOnly data,
+        CancellationToken cancellationToken)
+    {
+        var keys = new[]
+        {
+            $"schedule:teacher:{professoraId:N}:{data:yyyyMMdd}",
+            $"schedule:student:{alunoId:N}:{data:yyyyMMdd}"
+        }.Order(StringComparer.Ordinal);
+
+        foreach (var key in keys)
+        {
+            const string sql = "select pg_advisory_xact_lock(hashtextextended(@key, 0));";
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.Parameters.AddWithValue("key", key);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private static async Task<int> ContarParticipantesAsync(
@@ -1725,7 +1804,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         Guid studentId,
         CancellationToken cancellationToken)
     {
-        const string sql = "select exists(select 1 from public.alunos where id = @id and ativo = true);";
+        const string sql = "select exists(select 1 from public.alunos where id = @id and ativo = true and status in ('Ativo','Experimental','Inadimplente'));";
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("id", studentId);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false);
@@ -1737,7 +1816,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         Guid teacherId,
         CancellationToken cancellationToken)
     {
-        const string sql = "select exists(select 1 from public.professoras where id = @id and ativo = true);";
+        const string sql = "select exists(select 1 from public.professoras where id = @id and ativo = true and status = 'Ativa');";
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("id", teacherId);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false);

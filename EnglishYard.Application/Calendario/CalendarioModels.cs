@@ -15,7 +15,9 @@ public sealed record AulaCalendarioResponse(
     string Tipo,
     bool PossuiRegistroReal,
     string? Resultado,
-    bool EhReposicao);
+    bool EhReposicao,
+    string? AlunoFotoUrl = null,
+    string? ProfessoraFotoUrl = null);
 
 public sealed record HorarioGradeSemanalResponse(
     Guid HorarioRecorrenteId,
@@ -24,5 +26,7 @@ public sealed record HorarioGradeSemanalResponse(
     TimeOnly HoraFim,
     Guid AlunoId,
     string AlunoNome,
+    string? AlunoFotoUrl,
     Guid ProfessoraId,
-    string ProfessoraNome);
+    string ProfessoraNome,
+    string? ProfessoraFotoUrl);

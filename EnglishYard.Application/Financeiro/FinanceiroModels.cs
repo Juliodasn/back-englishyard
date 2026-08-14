@@ -138,3 +138,37 @@ public sealed record CadastrarDespesaRequest(
 public sealed record MarcarDespesaPagaRequest(
     DateOnly? DataPagamento,
     string? FormaPagamento);
+
+public sealed record MotivoOperacaoFinanceiraRequest(string Motivo);
+
+public sealed record AjustarMensalidadeRequest(decimal Desconto, string Motivo);
+
+public sealed record AtualizarDespesaRequest(
+    string Descricao,
+    string Categoria,
+    string? Fornecedor,
+    decimal Valor,
+    DateOnly DataVencimento,
+    string? FormaPagamento,
+    string? Observacoes,
+    string Motivo);
+
+public sealed record CriarAjusteProfessoraRequest(string Descricao, decimal Valor);
+public sealed record MarcarFechamentoPagoRequest(DateOnly DataPagamento, string? ComprovanteUrl);
+
+public sealed record PoliticaPagamentoResponse(
+    Guid Id,
+    bool AulaAplicadaPaga,
+    bool AulaPerdidaPaga,
+    bool RemarcadaAlunoPaga,
+    bool RemarcadaProfessoraPaga,
+    bool ReposicaoRealizadaPaga,
+    DateOnly VigenteDesde);
+
+public sealed record SalvarPoliticaPagamentoRequest(
+    bool AulaAplicadaPaga,
+    bool AulaPerdidaPaga,
+    bool RemarcadaAlunoPaga,
+    bool RemarcadaProfessoraPaga,
+    bool ReposicaoRealizadaPaga,
+    DateOnly VigenteDesde);

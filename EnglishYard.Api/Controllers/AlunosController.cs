@@ -13,6 +13,7 @@ namespace EnglishYard.Api.Controllers;
 public sealed class AlunosController(AlunoService service) : ControllerBase
 {
     [HttpGet]
+    [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<IReadOnlyList<AlunoResponse>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<AlunoResponse>>> Listar(CancellationToken cancellationToken)
     {
@@ -30,6 +31,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
 
 
     [HttpGet("paginado")]
+    [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<AlunoListagemPaginadaResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<AlunoListagemPaginadaResponse>> ListarPaginado(
@@ -70,6 +72,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     }
 
     [HttpGet("exportacao")]
+    [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<IReadOnlyList<AlunoExportacaoResponse>>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<IReadOnlyList<AlunoExportacaoResponse>>> ListarExportacao(
@@ -105,7 +108,33 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
         }
     }
 
+    [HttpGet("operacionais")]
+    [ProducesResponseType<IReadOnlyList<AlunoOperacionalResponse>>(StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<AlunoOperacionalResponse>>> ListarOperacionais(
+        CancellationToken cancellationToken)
+    {
+        Guid? professoraId = null;
+        if (User.IsInRole(PortalRoles.Professora))
+        {
+            professoraId = GetProfessoraId();
+            if (!professoraId.HasValue) return Forbid();
+        }
+
+        return Ok(await service.ListarOperacionaisAsync(professoraId, cancellationToken));
+    }
+
+    [HttpGet("arquivados")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<ActionResult<IReadOnlyList<AlunoArquivadoResponse>>> ListarArquivados(CancellationToken cancellationToken) =>
+        Ok(await service.ListarArquivadosAsync(cancellationToken));
+
+    [HttpPost("{id:guid}/restaurar")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> Restaurar(Guid id, CancellationToken cancellationToken) =>
+        await service.RestaurarAsync(id, cancellationToken) ? NoContent() : NotFound();
+
     [HttpGet("{id:guid}")]
+    [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<AlunoResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<AlunoResponse>> ObterPorId(Guid id, CancellationToken cancellationToken)
@@ -121,6 +150,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     }
 
     [HttpGet("{id:guid}/agenda")]
+    [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<AgendaAlunoResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<AgendaAlunoResponse>> ObterAgenda(Guid id, CancellationToken cancellationToken)

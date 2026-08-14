@@ -12,6 +12,14 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
         return alunos.Select(AlunoResponse.FromEntity).ToArray();
     }
 
+    public async Task<IReadOnlyList<AlunoOperacionalResponse>> ListarOperacionaisAsync(
+        Guid? professoraId,
+        CancellationToken cancellationToken)
+    {
+        var alunos = await repository.ListarAsync(professoraId, cancellationToken);
+        return alunos.Select(aluno => new AlunoOperacionalResponse(aluno.Id, aluno.Nome, aluno.FotoUrl)).ToArray();
+    }
+
 
     public async Task<AlunoListagemPaginadaResponse> ListarPaginadoAsync(
         Guid? professoraAcessoId,
@@ -236,6 +244,9 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
                 "Escolha outro horário para evitar sobreposição.");
         }
     }
+
+    public Task<IReadOnlyList<AlunoArquivadoResponse>> ListarArquivadosAsync(CancellationToken cancellationToken) => repository.ListarArquivadosAsync(cancellationToken);
+    public Task<bool> RestaurarAsync(Guid alunoId, CancellationToken cancellationToken) => repository.RestaurarAsync(alunoId, cancellationToken);
 
     private static CadastrarAlunoRequest Normalize(CadastrarAlunoRequest request) => request with
     {

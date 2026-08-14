@@ -24,7 +24,8 @@ public sealed record CadastrarAlunoRequest(
     decimal TaxaMatricula,
     decimal PercentualDesconto,
     string? Observacoes,
-    HorarioRecorrenteAlunoRequest[]? HorariosRecorrentes);
+    HorarioRecorrenteAlunoRequest[]? HorariosRecorrentes,
+    DateOnly? DataMatricula = null);
 
 public sealed record AtualizarAlunoRequest(
     string Nome,
@@ -42,7 +43,8 @@ public sealed record AtualizarAlunoRequest(
     decimal PercentualDesconto,
     string? Observacoes,
     DateOnly? AgendaVigenteDesde = null,
-    HorarioRecorrenteAlunoRequest[]? HorariosRecorrentes = null);
+    HorarioRecorrenteAlunoRequest[]? HorariosRecorrentes = null,
+    DateOnly? DataMatricula = null);
 
 public sealed record HorarioRecorrenteAlunoResponse(
     Guid Id,
@@ -91,7 +93,8 @@ public sealed record AlunoResponse(
     string? FotoUrl,
     bool Ativo,
     DateTimeOffset CriadoEm,
-    DateTimeOffset AtualizadoEm)
+    DateTimeOffset AtualizadoEm,
+    DateOnly DataMatricula)
 {
     public static AlunoResponse FromEntity(Aluno aluno) => new(
         aluno.Id,
@@ -115,7 +118,8 @@ public sealed record AlunoResponse(
         aluno.FotoUrl,
         aluno.Ativo,
         aluno.CriadoEm,
-        aluno.AtualizadoEm);
+        aluno.AtualizadoEm,
+        aluno.DataMatricula);
 }
 
 public sealed record ProfessoraResumoResponse(Guid Id, string Nome, string Status);
@@ -137,3 +141,10 @@ public sealed record AlunoExportacaoResponse(
     short? DiaVencimento,
     string Status);
 
+public sealed record AlunoOperacionalResponse(
+    Guid Id,
+    string Nome,
+    string? FotoUrl);
+
+public sealed record AlunoArquivadoResponse(
+    Guid Id, string Nome, string? Email, string Status, string? FotoUrl, DateOnly? DataArquivamento);

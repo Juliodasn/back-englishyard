@@ -25,11 +25,16 @@ public interface IProfessoraRepository
         string telefone,
         CancellationToken cancellationToken);
     Task<bool> ExcluirAsync(Guid professoraId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProfessoraArquivadaResponse>> ListarArquivadasAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProfessoraArquivadaResponse>>([]);
+    Task<bool> RestaurarAsync(Guid professoraId, CancellationToken cancellationToken) => Task.FromResult(false);
     Task<bool> AtualizarFotoUrlAsync(Guid professoraId, string fotoUrl, CancellationToken cancellationToken);
     Task<(string Nome, string Email)?> ObterDadosParaAcessoAsync(Guid professoraId, CancellationToken cancellationToken);
     Task<bool> PossuiPerfilAcessoAtivoAsync(Guid professoraId, CancellationToken cancellationToken);
     Task CriarPerfilAcessoAsync(Guid professoraId, Guid usuarioAuthId, string nome, string email, CancellationToken cancellationToken);
     Task<Guid?> ObterUsuarioAuthIdAsync(Guid professoraId, CancellationToken cancellationToken);
+    Task AtualizarEmailAcessoAsync(Guid professoraId, string email, CancellationToken cancellationToken) => Task.CompletedTask;
+    Task MarcarTrocaSenhaObrigatoriaAsync(Guid professoraId, CancellationToken cancellationToken) => Task.CompletedTask;
+    Task RevogarSessoesAsync(Guid professoraId, CancellationToken cancellationToken) => Task.CompletedTask;
     Task<Guid?> ObterUsuarioAuthIdInativoPorEmailAsync(string email, CancellationToken cancellationToken);
     Task<bool> EmailExisteAsync(string email, CancellationToken cancellationToken);
 }

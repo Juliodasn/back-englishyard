@@ -36,7 +36,9 @@ public sealed record OcorrenciaAulaData(
     bool ElegivelPagamento,
     decimal ValorPagamento,
     string? Observacao,
-    string? ReposicaoStatus);
+    string? ReposicaoStatus,
+    string? AlunoFotoUrl = null,
+    string? ProfessoraFotoUrl = null);
 
 public sealed record RegistroAulaDiaResponse(
     string OcorrenciaId,
@@ -61,7 +63,9 @@ public sealed record RegistroAulaDiaResponse(
     string? Observacao,
     string? ReposicaoStatus,
     bool PodeRegistrarResultado,
-    bool PodeRemarcar);
+    bool PodeRemarcar,
+    string? AlunoFotoUrl = null,
+    string? ProfessoraFotoUrl = null);
 
 public sealed record RegistrarResultadoAulaRequest(
     string OcorrenciaId,
@@ -104,8 +108,10 @@ public sealed record ReposicaoResponse(
     Guid AulaOrigemId,
     Guid AlunoId,
     string AlunoNome,
+    string? AlunoFotoUrl,
     Guid ProfessoraOrigemId,
     string ProfessoraOrigemNome,
+    string? ProfessoraOrigemFotoUrl,
     string Motivo,
     string Status,
     DateOnly DataOrigem,
@@ -117,6 +123,7 @@ public sealed record ReposicaoResponse(
     TimeOnly? HoraFim,
     Guid? ProfessoraAgendadaId,
     string? ProfessoraAgendadaNome,
+    string? ProfessoraAgendadaFotoUrl,
     string? ObservacaoAgendamento,
     Guid? AulaReposicaoId,
     DateTimeOffset CriadoEm,

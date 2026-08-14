@@ -17,13 +17,15 @@ public sealed class PerfilUsuarioRepository(NpgsqlDataSource dataSource) : IPerf
                 coalesce(nullif(p.foto_url, ''), nullif(pu.foto_url, '')) as foto_url,
                 pu.ativo,
                 pu.deve_alterar_senha,
-                pu.ultimo_acesso_em
+                pu.ultimo_acesso_em,
+                pu.sessoes_revogadas_antes_de
             from public.perfis_usuarios pu
             left join public.professoras p
               on p.id = pu.professora_id
              and p.ativo = true
             where pu.usuario_auth_id = @usuario_auth_id
               and pu.ativo = true
+              and (pu.tipo_usuario <> 'Professora' or p.status in ('Ativa', 'Em onboarding', 'Em férias'))
             order by pu.atualizado_em desc, pu.criado_em desc
             limit 1;
             """;
@@ -44,7 +46,8 @@ public sealed class PerfilUsuarioRepository(NpgsqlDataSource dataSource) : IPerf
             reader.IsDBNull(5) ? null : reader.GetString(5),
             reader.GetBoolean(6),
             reader.GetBoolean(7),
-            reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8));
+            reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
+            reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTimeOffset>(9));
     }
 
     public async Task<bool> ExisteAdministradorAtivoAsync(CancellationToken cancellationToken)

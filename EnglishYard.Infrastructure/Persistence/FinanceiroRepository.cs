@@ -23,6 +23,9 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
 
     public async Task<FinanceiroResumoResponse> ObterResumoAsync(DateOnly competencia, CancellationToken cancellationToken)
     {
+        // A primeira leitura da competência materializa a cobrança com as condições
+        // vigentes naquele mês. Depois disso, alterações no cadastro não reescrevem o passado.
+        await MaterializarMensalidadesAsync(competencia, cancellationToken);
         var mensalidades = await ListarMensalidadesAsync(competencia, cancellationToken);
         var despesas = await ListarDespesasAsync(competencia, cancellationToken);
         var professoras = await ListarProfessorasResumoAsync(competencia, cancellationToken);
@@ -210,15 +213,25 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             string? expectedPaymentMethod;
 
             const string studentSql = """
-                select valor_mensalidade, taxa_matricula,
-                       date_trunc('month', criado_em at time zone 'America/Sao_Paulo')::date as competencia_matricula,
-                       percentual_desconto, coalesce(dia_vencimento, 10), forma_pagamento
-                from public.alunos
-                where id = @id and ativo = true;
+                select c.valor_mensalidade, c.taxa_matricula,
+                       date_trunc('month', a.data_matricula)::date as competencia_matricula,
+                       c.percentual_desconto, coalesce(c.dia_vencimento, 10), c.forma_pagamento
+                from public.alunos a
+                join lateral (
+                  select * from public.condicoes_mensalidade_alunos c
+                  where c.aluno_id = a.id
+                    and c.vigente_desde <= @competencia
+                    and (c.vigente_ate is null or c.vigente_ate >= @competencia)
+                  order by c.vigente_desde desc limit 1
+                ) c on true
+                where a.id = @id
+                  and a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
+                  and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia);
                 """;
             await using (var studentCommand = new NpgsqlCommand(studentSql, connection, transaction))
             {
                 studentCommand.Parameters.AddWithValue("id", alunoId);
+                studentCommand.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
                 await using var reader = await studentCommand.ExecuteReaderAsync(cancellationToken);
                 if (!await reader.ReadAsync(cancellationToken))
                     throw new FinanceiroNotFoundException("Aluno não encontrado ou inativo.");
@@ -290,7 +303,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             }
 
             decimal alreadyReceived;
-            const string receivedSql = "select coalesce(sum(valor_recebido), 0) from public.recebimentos_mensalidades where mensalidade_id = @id;";
+            const string receivedSql = "select coalesce(sum(valor_recebido), 0) from public.recebimentos_mensalidades where mensalidade_id = @id and estornado_em is null;";
             await using (var receivedCommand = new NpgsqlCommand(receivedSql, connection, transaction))
             {
                 receivedCommand.Parameters.AddWithValue("id", chargeId);
@@ -424,6 +437,107 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
+    public async Task<bool> EstornarRecebimentoAsync(Guid id, string motivo, Guid usuarioId, CancellationToken ct)
+    {
+        const string sql = """
+            with old as (select to_jsonb(r.*) dados from public.recebimentos_mensalidades r where id=@id and estornado_em is null),
+            changed as (update public.recebimentos_mensalidades set estornado_em=now(), motivo_estorno=@motivo, estornado_por=@usuario, atualizado_em=now() where id=@id and estornado_em is null returning to_jsonb(recebimentos_mensalidades.*) dados),
+            audit as (insert into public.historico_operacoes_financeiras(entidade_tipo,entidade_id,acao,dados_anteriores,dados_novos,motivo,alterado_por) select 'recebimento',@id,'estornado',old.dados,changed.dados,@motivo,@usuario from old,changed)
+            select exists(select 1 from changed);
+            """;
+        return await ExecuteOperationAsync(sql, id, motivo, usuarioId, ct);
+    }
+
+    public async Task<bool> AjustarMensalidadeAsync(Guid id, decimal desconto, string motivo, Guid usuarioId, CancellationToken ct)
+    {
+        const string sql = """
+            with old as (select to_jsonb(m.*) dados from public.mensalidades m where id=@id),
+            changed as (update public.mensalidades m set desconto=@valor, valor_final=valor_original-@valor, atualizado_em=now()
+              where id=@id and @valor between 0 and valor_original and valor_original-@valor >= coalesce((select sum(valor_recebido) from public.recebimentos_mensalidades r where r.mensalidade_id=m.id and r.estornado_em is null),0)
+              returning to_jsonb(m.*) dados),
+            audit as (insert into public.historico_operacoes_financeiras(entidade_tipo,entidade_id,acao,dados_anteriores,dados_novos,motivo,alterado_por) select 'mensalidade',@id,'desconto_especial',old.dados,changed.dados,@motivo,@usuario from old,changed)
+            select exists(select 1 from changed);
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        AddOperationParameters(command, id, motivo, usuarioId); command.Parameters.AddWithValue("valor", NpgsqlDbType.Numeric, desconto);
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(ct) ?? false);
+    }
+
+    public async Task<bool> CancelarMensalidadeAsync(Guid id, string motivo, Guid usuarioId, CancellationToken ct)
+    {
+        const string sql = """
+            with old as (select to_jsonb(m.*) dados from public.mensalidades m where id=@id),
+            changed as (update public.mensalidades m set status='cancelado', observacoes=concat_ws(E'\n',observacoes,@motivo), atualizado_em=now()
+              where id=@id and not exists(select 1 from public.recebimentos_mensalidades r where r.mensalidade_id=m.id and r.estornado_em is null) returning to_jsonb(m.*) dados),
+            audit as (insert into public.historico_operacoes_financeiras(entidade_tipo,entidade_id,acao,dados_anteriores,dados_novos,motivo,alterado_por) select 'mensalidade',@id,'cancelada',old.dados,changed.dados,@motivo,@usuario from old,changed)
+            select exists(select 1 from changed);
+            """;
+        return await ExecuteOperationAsync(sql, id, motivo, usuarioId, ct);
+    }
+
+    public async Task<bool> AtualizarDespesaAsync(Guid id, AtualizarDespesaRequest request, Guid usuarioId, CancellationToken ct)
+    {
+        const string sql = """
+            with old as (select to_jsonb(d.*) dados from public.despesas d where id=@id),
+            changed as (update public.despesas d set descricao=@descricao,categoria=@categoria,fornecedor=@fornecedor,valor=@valor,data_vencimento=@vencimento,forma_pagamento=@forma,observacoes=@observacoes,atualizado_em=now() where id=@id and status<>'cancelada' returning to_jsonb(d.*) dados),
+            audit as (insert into public.historico_operacoes_financeiras(entidade_tipo,entidade_id,acao,dados_anteriores,dados_novos,motivo,alterado_por) select 'despesa',@id,'editada',old.dados,changed.dados,@motivo,@usuario from old,changed)
+            select exists(select 1 from changed);
+            """;
+        await using var command = dataSource.CreateCommand(sql); AddOperationParameters(command,id,request.Motivo,usuarioId);
+        command.Parameters.AddWithValue("descricao",request.Descricao.Trim()); command.Parameters.AddWithValue("categoria",request.Categoria.Trim());
+        command.Parameters.Add(new NpgsqlParameter("fornecedor",NpgsqlDbType.Text){Value=request.Fornecedor??(object)DBNull.Value}); command.Parameters.AddWithValue("valor",NpgsqlDbType.Numeric,request.Valor);
+        command.Parameters.AddWithValue("vencimento",NpgsqlDbType.Date,request.DataVencimento); command.Parameters.Add(new NpgsqlParameter("forma",NpgsqlDbType.Text){Value=request.FormaPagamento??(object)DBNull.Value});
+        command.Parameters.Add(new NpgsqlParameter("observacoes",NpgsqlDbType.Text){Value=request.Observacoes??(object)DBNull.Value});
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(ct)??false);
+    }
+
+    public Task<bool> CancelarDespesaAsync(Guid id,string motivo,Guid usuarioId,CancellationToken ct) => ChangeExpenseStatusAsync(id,"cancelada","cancelada",motivo,usuarioId,ct);
+    public Task<bool> ReabrirDespesaAsync(Guid id,string motivo,Guid usuarioId,CancellationToken ct) => ChangeExpenseStatusAsync(id,"em_aberto","reaberta",motivo,usuarioId,ct);
+
+    public async Task<Guid> CriarAjusteProfessoraAsync(Guid professoraId,DateOnly competencia,CriarAjusteProfessoraRequest request,Guid usuarioId,CancellationToken ct)
+    {
+        const string sql="""insert into public.ajustes_pagamento_professoras(professora_id,competencia,descricao,valor,criado_por) select @p,@c,@d,@v,@u where not exists(select 1 from public.fechamentos_professoras where professora_id=@p and competencia=@c and status in ('Aprovado','Pago')) returning id;""";
+        await using var command=dataSource.CreateCommand(sql); command.Parameters.AddWithValue("p",professoraId); command.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia); command.Parameters.AddWithValue("d",request.Descricao); command.Parameters.AddWithValue("v",NpgsqlDbType.Numeric,request.Valor); command.Parameters.AddWithValue("u",usuarioId);
+        return (Guid)(await command.ExecuteScalarAsync(ct)??throw new FinanceiroConflitoException("O fechamento aprovado ou pago não aceita ajustes."));
+    }
+
+    public async Task<bool> ExcluirAjusteProfessoraAsync(Guid id,Guid usuarioId,CancellationToken ct)
+    {
+        const string sql="""delete from public.ajustes_pagamento_professoras a where id=@id and not exists(select 1 from public.fechamentos_professoras f where f.professora_id=a.professora_id and f.competencia=a.competencia and f.status in ('Aprovado','Pago')) returning id;""";
+        await using var command=dataSource.CreateCommand(sql); command.Parameters.AddWithValue("id",id); return await command.ExecuteScalarAsync(ct) is not null;
+    }
+
+    public async Task<bool> AprovarFechamentoAsync(Guid professoraId,DateOnly competencia,Guid usuarioId,CancellationToken ct)
+    {
+        var s=await ObterDemonstrativoProfessoraAsync(professoraId,competencia,ct); if(s is null)return false;
+        const string sql="""insert into public.fechamentos_professoras(professora_id,competencia,quantidade_aulas_individuais,quantidade_aulas_grupo,quantidade_reposicoes,quantidade_aulas_perdidas,valor_aulas,valor_ajustes,valor_total,status,aprovado_em,aprovado_por) values(@p,@c,@i,@g,@r,@f,@a,@j,@t,'Aprovado',now(),@u) on conflict(professora_id,competencia) do update set quantidade_aulas_individuais=excluded.quantidade_aulas_individuais,quantidade_aulas_grupo=excluded.quantidade_aulas_grupo,quantidade_reposicoes=excluded.quantidade_reposicoes,quantidade_aulas_perdidas=excluded.quantidade_aulas_perdidas,valor_aulas=excluded.valor_aulas,valor_ajustes=excluded.valor_ajustes,valor_total=excluded.valor_total,status='Aprovado',aprovado_em=now(),aprovado_por=@u where fechamentos_professoras.status<>'Pago' returning id;""";
+        await using var cmd=dataSource.CreateCommand(sql); cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("i",s.AulasIndividuais);cmd.Parameters.AddWithValue("g",s.AulasGrupo);cmd.Parameters.AddWithValue("r",s.ReposicoesRealizadas);cmd.Parameters.AddWithValue("f",s.FaltasAluno);cmd.Parameters.AddWithValue("a",NpgsqlDbType.Numeric,s.ValorRealizado);cmd.Parameters.AddWithValue("j",NpgsqlDbType.Numeric,s.Ajustes);cmd.Parameters.AddWithValue("t",NpgsqlDbType.Numeric,s.ValorTotal);cmd.Parameters.AddWithValue("u",usuarioId); return await cmd.ExecuteScalarAsync(ct)is not null;
+    }
+
+    public async Task<bool> MarcarFechamentoPagoAsync(Guid professoraId,DateOnly competencia,MarcarFechamentoPagoRequest request,Guid usuarioId,CancellationToken ct)
+    {
+        const string sql="""update public.fechamentos_professoras set status='Pago',pago_em=now(),data_pagamento=@d,comprovante_url=@x,atualizado_em=now() where professora_id=@p and competencia=@c and status='Aprovado' returning id;""";
+        await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("d",NpgsqlDbType.Date,request.DataPagamento);cmd.Parameters.Add(new NpgsqlParameter("x",NpgsqlDbType.Text){Value=request.ComprovanteUrl??(object)DBNull.Value});return await cmd.ExecuteScalarAsync(ct)is not null;
+    }
+
+    public async Task<bool> ReabrirFechamentoAsync(Guid professoraId,DateOnly competencia,string motivo,Guid usuarioId,CancellationToken ct)
+    {
+        const string sql="""update public.fechamentos_professoras set status='Em conferência',aprovado_em=null,pago_em=null,data_pagamento=null,comprovante_url=null,atualizado_em=now() where professora_id=@p and competencia=@c returning id;""";
+        await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);return await cmd.ExecuteScalarAsync(ct)is not null;
+    }
+
+    public async Task<PoliticaPagamentoResponse?> ObterPoliticaPagamentoAsync(DateOnly data,CancellationToken ct)
+    {
+        const string sql="""select id,aula_aplicada_paga,aula_perdida_paga,remarcada_aluno_paga,remarcada_professora_paga,reposicao_realizada_paga,vigente_desde from public.politica_pagamento_professoras where vigente_desde<=@d order by vigente_desde desc,criado_em desc limit 1;""";
+        await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("d",NpgsqlDbType.Date,data);await using var r=await cmd.ExecuteReaderAsync(ct);if(!await r.ReadAsync(ct))return null;return MapPolicy(r);
+    }
+
+    public async Task<PoliticaPagamentoResponse> SalvarPoliticaPagamentoAsync(SalvarPoliticaPagamentoRequest request,Guid usuarioId,CancellationToken ct)
+    {
+        await using var cn=await dataSource.OpenConnectionAsync(ct);await using var tx=await cn.BeginTransactionAsync(ct);try{await using(var off=new NpgsqlCommand("update public.politica_pagamento_professoras set ativo=false where ativo=true;",cn,tx))await off.ExecuteNonQueryAsync(ct);
+        const string sql="""insert into public.politica_pagamento_professoras(aula_aplicada_paga,aula_perdida_paga,remarcada_aluno_paga,remarcada_professora_paga,reposicao_realizada_paga,vigente_desde,ativo,criado_por)values(@a,@p,@ra,@rp,@r,@d,true,@u)returning id,aula_aplicada_paga,aula_perdida_paga,remarcada_aluno_paga,remarcada_professora_paga,reposicao_realizada_paga,vigente_desde;""";await using var cmd=new NpgsqlCommand(sql,cn,tx);cmd.Parameters.AddWithValue("a",request.AulaAplicadaPaga);cmd.Parameters.AddWithValue("p",request.AulaPerdidaPaga);cmd.Parameters.AddWithValue("ra",request.RemarcadaAlunoPaga);cmd.Parameters.AddWithValue("rp",request.RemarcadaProfessoraPaga);cmd.Parameters.AddWithValue("r",request.ReposicaoRealizadaPaga);cmd.Parameters.AddWithValue("d",NpgsqlDbType.Date,request.VigenteDesde);cmd.Parameters.AddWithValue("u",usuarioId);await using var reader=await cmd.ExecuteReaderAsync(ct);await reader.ReadAsync(ct);var result=MapPolicy(reader);await reader.DisposeAsync();await tx.CommitAsync(ct);return result;}catch{await tx.RollbackAsync(ct);throw;}
+    }
+
     private async Task<List<MensalidadeFinanceiroResponse>> ListarMensalidadesAsync(DateOnly competencia, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -431,12 +545,12 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 m.id,
                 a.id,
                 a.nome,
-                a.valor_mensalidade,
-                a.taxa_matricula,
-                date_trunc('month', a.criado_em at time zone 'America/Sao_Paulo')::date as competencia_matricula,
-                a.percentual_desconto,
-                coalesce(a.dia_vencimento, 10),
-                a.forma_pagamento,
+                c.valor_mensalidade,
+                c.taxa_matricula,
+                date_trunc('month', a.data_matricula)::date as competencia_matricula,
+                c.percentual_desconto,
+                coalesce(c.dia_vencimento, 10),
+                c.forma_pagamento,
                 m.descricao,
                 m.valor_original,
                 m.desconto,
@@ -446,20 +560,28 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 m.forma_pagamento_prevista,
                 coalesce(r.valor_recebido, 0) as valor_recebido
             from public.alunos a
+            join lateral (
+              select * from public.condicoes_mensalidade_alunos c
+              where c.aluno_id = a.id
+                and c.vigente_desde <= @competencia
+                and (c.vigente_ate is null or c.vigente_ate >= @competencia)
+              order by c.vigente_desde desc limit 1
+            ) c on true
             left join public.mensalidades m
               on m.aluno_id = a.id
              and m.competencia = @competencia
             left join lateral (
                 select sum(valor_recebido) as valor_recebido
                 from public.recebimentos_mensalidades
-                where mensalidade_id = m.id
+                where mensalidade_id = m.id and estornado_em is null
             ) r on true
-            where a.ativo = true
+            where a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
+              and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia)
               and (
-                a.valor_mensalidade is not null
+                c.valor_mensalidade is not null
                 or (
-                    a.taxa_matricula > 0
-                    and date_trunc('month', a.criado_em at time zone 'America/Sao_Paulo')::date = @competencia
+                    c.taxa_matricula > 0
+                    and date_trunc('month', a.data_matricula)::date = @competencia
                 )
               )
             order by a.nome;
@@ -512,6 +634,61 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         return result;
     }
 
+    private async Task MaterializarMensalidadesAsync(DateOnly competencia, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            insert into public.mensalidades (
+              aluno_id, competencia, descricao, valor_original, desconto, valor_final,
+              data_vencimento, status, forma_pagamento_prevista, observacoes
+            )
+            select
+              a.id,
+              @competencia,
+              case
+                when coalesce(c.valor_mensalidade, 0) > 0
+                  and date_trunc('month', a.data_matricula)::date = @competencia
+                  and c.taxa_matricula > 0 then 'Mensalidade + taxa de matrícula'
+                when date_trunc('month', a.data_matricula)::date = @competencia
+                  and c.taxa_matricula > 0 then 'Taxa de matrícula'
+                else 'Mensalidade'
+              end,
+              greatest(coalesce(c.valor_mensalidade, 0), 0)
+                + case when date_trunc('month', a.data_matricula)::date = @competencia then greatest(c.taxa_matricula, 0) else 0 end,
+              round(greatest(coalesce(c.valor_mensalidade, 0), 0) * c.percentual_desconto / 100, 2),
+              greatest(coalesce(c.valor_mensalidade, 0), 0)
+                - round(greatest(coalesce(c.valor_mensalidade, 0), 0) * c.percentual_desconto / 100, 2)
+                + case when date_trunc('month', a.data_matricula)::date = @competencia then greatest(c.taxa_matricula, 0) else 0 end,
+              make_date(
+                extract(year from @competencia)::int,
+                extract(month from @competencia)::int,
+                least(coalesce(c.dia_vencimento, 10),
+                      extract(day from (date_trunc('month', @competencia) + interval '1 month - 1 day'))::int)
+              ),
+              'em_aberto',
+              c.forma_pagamento,
+              'Cobrança materializada com as condições vigentes na competência.'
+            from public.alunos a
+            join lateral (
+              select * from public.condicoes_mensalidade_alunos c
+              where c.aluno_id = a.id
+                and c.vigente_desde <= @competencia
+                and (c.vigente_ate is null or c.vigente_ate >= @competencia)
+              order by c.vigente_desde desc limit 1
+            ) c on true
+            where a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
+              and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia)
+              and (
+                coalesce(c.valor_mensalidade, 0) > 0
+                or (c.taxa_matricula > 0 and date_trunc('month', a.data_matricula)::date = @competencia)
+              )
+            on conflict (aluno_id, competencia) do nothing;
+            """;
+
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task<List<DespesaFinanceiroResponse>> ListarDespesasAsync(DateOnly competencia, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -531,11 +708,29 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
 
     private async Task<List<PagamentoProfessoraResumoResponse>> ListarProfessorasResumoAsync(DateOnly competencia, CancellationToken cancellationToken)
     {
-        const string sql = "select id from public.professoras where ativo = true order by nome;";
+        const string sql = """
+            select p.id
+            from public.professoras p
+            where p.ativo = true
+               or exists (
+                    select 1 from public.aulas au
+                    where au.professora_id = p.id
+                      and au.data_aula >= @competencia
+                      and au.data_aula < (@competencia + interval '1 month')::date
+               )
+               or exists (
+                    select 1 from public.fechamentos_professoras f
+                    where f.professora_id = p.id and f.competencia = @competencia
+               )
+            order by p.nome;
+            """;
         var ids = new List<Guid>();
         await using (var command = dataSource.CreateCommand(sql))
+        {
+            command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             while (await reader.ReadAsync(cancellationToken)) ids.Add(reader.GetGuid(0));
+        }
 
         var result = new List<PagamentoProfessoraResumoResponse>();
         foreach (var id in ids)
@@ -654,9 +849,9 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             select h.id, h.dia_semana, h.hora_inicio, h.hora_fim, h.data_inicio, h.data_fim,
                    a.id, a.nome
             from public.horarios_recorrentes_alunos h
-            join public.alunos a on a.id = h.aluno_id and a.ativo = true
+            join public.alunos a on a.id = h.aluno_id
             where h.professora_id = @id
-              and h.ativo = true
+              and (h.ativo = true or @fim < current_date)
               and h.data_inicio <= @fim
               and (h.data_fim is null or h.data_fim >= @inicio)
             order by h.dia_semana, h.hora_inicio, a.nome;
@@ -764,6 +959,36 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         var safeDay = Math.Clamp((int)dueDay, 1, DateTime.DaysInMonth(competence.Year, competence.Month));
         return new DateOnly(competence.Year, competence.Month, safeDay);
     }
+
+    private async Task<bool> ExecuteOperationAsync(string sql, Guid id, string motivo, Guid usuarioId, CancellationToken ct)
+    {
+        await using var command = dataSource.CreateCommand(sql);
+        AddOperationParameters(command, id, motivo, usuarioId);
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(ct) ?? false);
+    }
+
+    private static void AddOperationParameters(NpgsqlCommand command, Guid id, string motivo, Guid usuarioId)
+    {
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("motivo", motivo);
+        command.Parameters.AddWithValue("usuario", usuarioId);
+    }
+
+    private async Task<bool> ChangeExpenseStatusAsync(Guid id, string status, string action, string motivo, Guid usuarioId, CancellationToken ct)
+    {
+        const string sql = """
+            with old as (select to_jsonb(d.*) dados from public.despesas d where id=@id),
+            changed as (update public.despesas d set status=@status,data_pagamento=null,atualizado_em=now() where id=@id returning to_jsonb(d.*) dados),
+            audit as (insert into public.historico_operacoes_financeiras(entidade_tipo,entidade_id,acao,dados_anteriores,dados_novos,motivo,alterado_por) select 'despesa',@id,@acao,old.dados,changed.dados,@motivo,@usuario from old,changed)
+            select exists(select 1 from changed);
+            """;
+        await using var command=dataSource.CreateCommand(sql);AddOperationParameters(command,id,motivo,usuarioId);command.Parameters.AddWithValue("status",status);command.Parameters.AddWithValue("acao",action);
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(ct)??false);
+    }
+
+    private static PoliticaPagamentoResponse MapPolicy(NpgsqlDataReader reader) => new(
+        reader.GetGuid(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3),
+        reader.GetBoolean(4), reader.GetBoolean(5), reader.GetFieldValue<DateOnly>(6));
 
     private static DespesaFinanceiroResponse MapDespesa(NpgsqlDataReader reader)
     {

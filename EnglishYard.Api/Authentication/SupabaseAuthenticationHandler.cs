@@ -62,6 +62,10 @@ public sealed class SupabaseAuthenticationHandler(
             if (profile is null || !profile.Ativo)
                 return AuthenticateResult.Fail("Usuário sem perfil ativo no portal.");
 
+            if (profile.SessoesRevogadasAntesDe.HasValue && GetIssuedAt(token) is { } issuedAt
+                && issuedAt <= profile.SessoesRevogadasAntesDe.Value)
+                return AuthenticateResult.Fail("Sessão revogada pelo administrador.");
+
             var claims = new List<Claim>
             {
                 new(ClaimTypes.NameIdentifier, profile.UsuarioAuthId.ToString()),
@@ -84,5 +88,19 @@ public sealed class SupabaseAuthenticationHandler(
             Logger.LogWarning(exception, "Falha ao validar a sessão do Supabase.");
             return AuthenticateResult.Fail("Não foi possível validar a sessão atual.");
         }
+    }
+
+    private static DateTimeOffset? GetIssuedAt(string token)
+    {
+        try
+        {
+            var segment = token.Split('.')[1].Replace('-', '+').Replace('_', '/');
+            segment = segment.PadRight(segment.Length + ((4 - segment.Length % 4) % 4), '=');
+            using var payload = JsonDocument.Parse(Convert.FromBase64String(segment));
+            return payload.RootElement.TryGetProperty("iat", out var iat) && iat.TryGetInt64(out var seconds)
+                ? DateTimeOffset.FromUnixTimeSeconds(seconds)
+                : null;
+        }
+        catch { return null; }
     }
 }
