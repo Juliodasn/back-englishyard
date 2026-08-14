@@ -229,7 +229,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 join lateral (
                   select * from public.condicoes_mensalidade_alunos c
                   where c.aluno_id = a.id
-                    and c.vigente_desde <= @competencia
+                    and c.vigente_desde <= (@competencia + interval '1 month - 1 day')::date
                     and (c.vigente_ate is null or c.vigente_ate >= @competencia)
                   order by c.vigente_desde desc limit 1
                 ) c on true
@@ -577,7 +577,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             join lateral (
               select * from public.condicoes_mensalidade_alunos c
               where c.aluno_id = a.id
-                and c.vigente_desde <= @competencia
+                and c.vigente_desde <= (@competencia + interval '1 month - 1 day')::date
                 and (c.vigente_ate is null or c.vigente_ate >= @competencia)
               order by c.vigente_desde desc limit 1
             ) c on true
@@ -691,7 +691,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             join lateral (
               select * from public.condicoes_mensalidade_alunos c
               where c.aluno_id = a.id
-                and c.vigente_desde <= @competencia
+                and c.vigente_desde <= (@competencia + interval '1 month - 1 day')::date
                 and (c.vigente_ate is null or c.vigente_ate >= @competencia)
               order by c.vigente_desde desc limit 1
             ) c on true
