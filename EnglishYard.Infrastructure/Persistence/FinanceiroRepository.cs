@@ -235,7 +235,10 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 ) c on true
                 where a.id = @id
                   and a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
-                  and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia);
+                  and (
+                    a.ativo = true
+                    or (a.data_desativacao is not null and date_trunc('month', a.data_desativacao)::date >= @competencia)
+                  );
                 """;
             await using (var studentCommand = new NpgsqlCommand(studentSql, connection, transaction))
             {
@@ -590,7 +593,11 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 where mensalidade_id = m.id and estornado_em is null
             ) r on true
             where a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
-              and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia)
+              and (
+                a.ativo = true
+                or (a.data_desativacao is not null and date_trunc('month', a.data_desativacao)::date >= @competencia)
+                or (m.id is not null and @competencia < date_trunc('month', current_date)::date)
+              )
               and (
                 c.valor_mensalidade is not null
                 or (
@@ -696,7 +703,10 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
               order by c.vigente_desde desc limit 1
             ) c on true
             where a.data_matricula <= (@competencia + interval '1 month - 1 day')::date
-              and (a.data_desativacao is null or date_trunc('month', a.data_desativacao)::date >= @competencia)
+              and (
+                a.ativo = true
+                or (a.data_desativacao is not null and date_trunc('month', a.data_desativacao)::date >= @competencia)
+              )
               and (
                 coalesce(c.valor_mensalidade, 0) > 0
                 or (c.taxa_matricula > 0 and date_trunc('month', a.data_matricula)::date = @competencia)
