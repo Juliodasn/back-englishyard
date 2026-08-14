@@ -161,9 +161,14 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         }
 
         entries = entries.OrderBy(item => item.Data).ThenBy(item => item.HoraInicio).ToList();
-        var adjustments = await ObterAjustesAsync(professoraId, competencia, cancellationToken);
+        var adjustmentItems = await ListarAjustesAsync(professoraId, competencia, cancellationToken);
+        var adjustments = adjustmentItems.Sum(item => item.Valor);
         var closing = await ObterClosingAsync(professoraId, competencia, cancellationToken);
         var realizedTotal = entries.Sum(item => item.ValorRealizado);
+        var frozen = closing.Status is "Aprovado" or "Pago";
+        var displayedRealized = frozen ? closing.ValorAulas : realizedTotal;
+        var displayedAdjustments = frozen ? closing.ValorAjustes : adjustments;
+        var displayedTotal = frozen ? closing.ValorTotal : realizedTotal + adjustments;
 
         return new DemonstrativoProfessoraResponse(
             teacherId,
@@ -181,16 +186,20 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             entries.Count(item => item.ValorRealizado > 0),
             entries.Count(item => item.Status == "Realizada" || item.Status.StartsWith("Realizada ·", StringComparison.Ordinal)),
             entries.Count(item => item.Status.Contains("Falta do aluno", StringComparison.OrdinalIgnoreCase)),
-            entries.Count(item => item.Status == "Reposição realizada"),
+            frozen ? closing.Reposicoes : entries.Count(item => item.Status == "Reposição realizada"),
             entries.Count(item => item.Status.StartsWith("Remarcada", StringComparison.OrdinalIgnoreCase)),
-            entries.Count(item => item.Tipo == "Individual"),
-            entries.Count(item => item.Tipo == "Grupo"),
+            frozen ? closing.Individuais : entries.Count(item => item.Tipo == "Individual"),
+            frozen ? closing.Grupos : entries.Count(item => item.Tipo == "Grupo"),
             entries.Sum(item => item.ValorPrevisto),
-            realizedTotal,
-            adjustments,
-            realizedTotal + adjustments,
+            displayedRealized,
+            displayedAdjustments,
+            displayedTotal,
             closing.Status,
             closing.DataPagamento,
+            closing.ComprovanteUrl,
+            closing.AprovadoEm,
+            closing.PagoEm,
+            adjustmentItems,
             entries);
     }
 
@@ -284,8 +293,9 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             Guid chargeId;
             decimal storedFinalValue;
             DateOnly storedDueDate;
+            string storedStatus;
             const string chargeSql = """
-                select id, valor_final, data_vencimento
+                select id, valor_final, data_vencimento, status
                 from public.mensalidades
                 where aluno_id = @aluno_id and competencia = @competencia
                 for update;
@@ -300,7 +310,11 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 chargeId = reader.GetGuid(0);
                 storedFinalValue = reader.GetDecimal(1);
                 storedDueDate = reader.GetFieldValue<DateOnly>(2);
+                storedStatus = reader.GetString(3);
             }
+
+            if (storedStatus == "cancelado")
+                throw new FinanceiroConflitoException("Não é possível registrar pagamento em uma cobrança cancelada.");
 
             decimal alreadyReceived;
             const string receivedSql = "select coalesce(sum(valor_recebido), 0) from public.recebimentos_mensalidades where mensalidade_id = @id and estornado_em is null;";
@@ -628,10 +642,16 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                         : dueDate < today ? "Vencido" : "Em aberto";
 
             result.Add(new MensalidadeFinanceiroResponse(
-                chargeId, alunoId, alunoNome, description, original, discount, final, received, balance, dueDate, status, paymentMethod));
+                chargeId, alunoId, alunoNome, description, original, discount, final, received, balance, dueDate, status, paymentMethod, []));
         }
-
-        return result;
+        await reader.DisposeAsync();
+        var receipts = await ListarRecebimentosAsync(competencia, cancellationToken);
+        return result.Select(item => item with
+        {
+            Recebimentos = item.MensalidadeId.HasValue && receipts.TryGetValue(item.MensalidadeId.Value, out var items)
+                ? items
+                : []
+        }).ToList();
     }
 
     private async Task MaterializarMensalidadesAsync(DateOnly competencia, CancellationToken cancellationToken)
@@ -903,24 +923,57 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         return result;
     }
 
-    private async Task<decimal> ObterAjustesAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
+    private async Task<List<AjustePagamentoProfessoraResponse>> ListarAjustesAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
     {
-        const string sql = "select coalesce(sum(valor), 0) from public.ajustes_pagamento_professoras where professora_id = @id and competencia = @competencia;";
-        await using var command = dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("id", professoraId);
-        command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
-        return (decimal)(await command.ExecuteScalarAsync(cancellationToken) ?? 0m);
-    }
-
-    private async Task<(string Status, DateOnly? DataPagamento)> ObterClosingAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
-    {
-        const string sql = "select status, data_pagamento from public.fechamentos_professoras where professora_id = @id and competencia = @competencia;";
+        const string sql = "select id, descricao, valor, criado_em from public.ajustes_pagamento_professoras where professora_id = @id and competencia = @competencia order by criado_em;";
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("id", professoraId);
         command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken)) return ("Em conferência", null);
-        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetFieldValue<DateOnly>(1));
+        var result = new List<AjustePagamentoProfessoraResponse>();
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new(reader.GetGuid(0), reader.GetString(1), reader.GetDecimal(2), reader.GetFieldValue<DateTimeOffset>(3)));
+        return result;
+    }
+
+    private async Task<(string Status, DateOnly? DataPagamento, string? ComprovanteUrl, DateTimeOffset? AprovadoEm, DateTimeOffset? PagoEm, int Individuais, int Grupos, int Reposicoes, decimal ValorAulas, decimal ValorAjustes, decimal ValorTotal)> ObterClosingAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
+    {
+        const string sql = "select status, data_pagamento, comprovante_url, aprovado_em, pago_em, quantidade_aulas_individuais, quantidade_aulas_grupo, quantidade_reposicoes, valor_aulas, valor_ajustes, valor_total from public.fechamentos_professoras where professora_id = @id and competencia = @competencia;";
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", professoraId);
+        command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return ("Em conferência", null, null, null, null, 0, 0, 0, 0, 0, 0);
+        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetFieldValue<DateOnly>(1), GetNullableString(reader, 2),
+            reader.IsDBNull(3) ? null : reader.GetFieldValue<DateTimeOffset>(3), reader.IsDBNull(4) ? null : reader.GetFieldValue<DateTimeOffset>(4),
+            reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetDecimal(8), reader.GetDecimal(9), reader.GetDecimal(10));
+    }
+
+    private async Task<Dictionary<Guid, IReadOnlyList<RecebimentoMensalidadeResponse>>> ListarRecebimentosAsync(
+        DateOnly competencia,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select r.mensalidade_id, r.id, r.valor_recebido, r.data_recebimento,
+                   r.forma_pagamento, r.observacao, r.criado_em
+            from public.recebimentos_mensalidades r
+            join public.mensalidades m on m.id = r.mensalidade_id
+            where m.competencia = @competencia and r.estornado_em is null
+            order by r.data_recebimento, r.criado_em;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var grouped = new Dictionary<Guid, List<RecebimentoMensalidadeResponse>>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var mensalidadeId = reader.GetGuid(0);
+            if (!grouped.TryGetValue(mensalidadeId, out var items))
+                grouped[mensalidadeId] = items = [];
+            items.Add(new(reader.GetGuid(1), reader.GetDecimal(2), reader.GetFieldValue<DateOnly>(3), reader.GetString(4),
+                GetNullableString(reader, 5), reader.GetFieldValue<DateTimeOffset>(6)));
+        }
+        return grouped.ToDictionary(item => item.Key, item => (IReadOnlyList<RecebimentoMensalidadeResponse>)item.Value);
     }
 
     private static RateRow RateForDate(IReadOnlyList<RateRow> rates, DateOnly date)

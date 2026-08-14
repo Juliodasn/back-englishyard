@@ -1,5 +1,13 @@
 namespace EnglishYard.Application.Financeiro;
 
+public sealed record RecebimentoMensalidadeResponse(
+    Guid Id,
+    decimal Valor,
+    DateOnly DataRecebimento,
+    string FormaPagamento,
+    string? Observacao,
+    DateTimeOffset CriadoEm);
+
 public sealed record MensalidadeFinanceiroResponse(
     Guid? MensalidadeId,
     Guid AlunoId,
@@ -12,7 +20,8 @@ public sealed record MensalidadeFinanceiroResponse(
     decimal Saldo,
     DateOnly DataVencimento,
     string Status,
-    string? FormaPagamentoPrevista);
+    string? FormaPagamentoPrevista,
+    IReadOnlyList<RecebimentoMensalidadeResponse> Recebimentos);
 
 public sealed record DespesaFinanceiroResponse(
     Guid Id,
@@ -90,6 +99,12 @@ public sealed record AulaPagamentoProfessoraResponse(
     decimal ValorPrevisto,
     decimal ValorRealizado);
 
+public sealed record AjustePagamentoProfessoraResponse(
+    Guid Id,
+    string Descricao,
+    decimal Valor,
+    DateTimeOffset CriadoEm);
+
 public sealed record DemonstrativoProfessoraResponse(
     Guid ProfessoraId,
     string Nome,
@@ -116,6 +131,10 @@ public sealed record DemonstrativoProfessoraResponse(
     decimal ValorTotal,
     string StatusFechamento,
     DateOnly? DataPagamento,
+    string? ComprovanteUrl,
+    DateTimeOffset? AprovadoEm,
+    DateTimeOffset? PagoEm,
+    IReadOnlyList<AjustePagamentoProfessoraResponse> AjustesDetalhes,
     IReadOnlyList<AulaPagamentoProfessoraResponse> Aulas);
 
 public sealed record RegistrarRecebimentoRequest(

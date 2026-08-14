@@ -2,6 +2,7 @@ using EnglishYard.Api.Authentication;
 using EnglishYard.Infrastructure;
 using EnglishYard.Application.Autenticacao;
 using Microsoft.AspNetCore.Authentication;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -62,6 +63,26 @@ else
 }
 
 app.UseCors("Frontend");
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (PostgresException exception) when (exception.SqlState is "42P01" or "42703" or "42883")
+    {
+        if (context.Response.HasStarted) throw;
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        context.Response.ContentType = "application/problem+json";
+        await context.Response.WriteAsJsonAsync(new
+        {
+            title = "Estrutura do banco de dados desatualizada",
+            status = StatusCodes.Status503ServiceUnavailable,
+            detail = "A estrutura financeira necessária não foi encontrada. Execute, nesta ordem, as migrações 21_INTEGRIDADE_FINANCEIRA_E_HISTORICA.sql e 22_CONTROLE_SESSOES.sql."
+        });
+    }
+});
 app.UseAuthentication();
 app.Use(async (context, next) =>
 {
