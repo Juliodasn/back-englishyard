@@ -34,7 +34,8 @@ builder.Services.AddCors(options =>
         var origins = new List<string>
         {
             "http://localhost:4200",
-            "https://localhost:4200"
+            "https://localhost:4200",
+            "https://front-englishyard.vercel.app"
         };
 
         if (!string.IsNullOrWhiteSpace(frontendUrl))
