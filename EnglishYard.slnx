@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="EnglishYard.Api/EnglishYard.Api.csproj" />
+  <Project Path="EnglishYard.Application/EnglishYard.Application.csproj" />
+  <Project Path="EnglishYard.Domain/EnglishYard.Domain.csproj" />
+  <Project Path="EnglishYard.Infrastructure/EnglishYard.Infrastructure.csproj" />
+  <Project Path="EnglishYard.Tests/EnglishYard.Tests.csproj" />
+</Solution>

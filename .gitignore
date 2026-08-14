@@ -1,0 +1,25 @@
+# Angular / Node
+node_modules/
+dist/
+.angular/
+.vscode/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# .NET
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Secrets / environment
+.env
+.env.*
+appsettings.Development.json
+secrets.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+@EnglishYard.Api_HostAddress = http://localhost:5187
+
+GET {{EnglishYard.Api_HostAddress}}/api/alunos
+Accept: application/json
+
+###
+
+GET {{EnglishYard.Api_HostAddress}}/api/professoras
+Accept: application/json
