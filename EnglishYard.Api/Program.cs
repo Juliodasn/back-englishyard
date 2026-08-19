@@ -2,6 +2,7 @@ using EnglishYard.Api.Authentication;
 using EnglishYard.Infrastructure;
 using EnglishYard.Application.Autenticacao;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.HttpOverrides;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,6 +18,16 @@ if (builder.Environment.IsDevelopment())
         reloadOnChange: true);
 }
 
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+    // O Render atua como proxy reverso antes do container.
+    // Limpar as listas permite respeitar os headers X-Forwarded-* enviados pela plataforma.
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 builder.Services.AddInfrastructure(builder.Configuration);
@@ -26,7 +37,7 @@ builder.Services
         SupabaseAuthenticationHandler.SchemeName,
         _ => { });
 builder.Services.AddAuthorization();
-var frontendUrl = builder.Configuration["Frontend:Url"];
+var frontendUrl = builder.Configuration["Frontend:Url"]?.TrimEnd('/');
 
 builder.Services.AddCors(options =>
 {
@@ -37,23 +48,25 @@ builder.Services.AddCors(options =>
             "http://localhost:4200",
             "https://localhost:4200",
             "https://front-englishyard.vercel.app",
-            "https://www.englishyard.com.br/",
-            "https://englishyard.com.br/",
+            "https://www.englishyard.com.br",
+            "https://englishyard.com.br",
         };
 
         if (!string.IsNullOrWhiteSpace(frontendUrl))
         {
-            origins.Add(frontendUrl.TrimEnd('/'));
+            origins.Add(frontendUrl);
         }
 
         policy
-            .WithOrigins(origins.ToArray())
+            .WithOrigins(origins.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
 });
 
 var app = builder.Build();
+
+app.UseForwardedHeaders();
 
 if (app.Environment.IsDevelopment())
 {
@@ -65,6 +78,19 @@ else
 }
 
 app.UseCors("Frontend");
+
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "ok",
+    service = "EnglishYard.Api"
+})).AllowAnonymous();
+
+app.MapGet("/api/health", () => Results.Ok(new
+{
+    status = "ok",
+    service = "EnglishYard.Api"
+})).AllowAnonymous();
+
 app.Use(async (context, next) =>
 {
     try
