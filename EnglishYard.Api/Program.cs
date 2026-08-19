@@ -36,7 +36,9 @@ builder.Services.AddCors(options =>
         {
             "http://localhost:4200",
             "https://localhost:4200",
-            "https://front-englishyard.vercel.app"
+            "https://front-englishyard.vercel.app",
+            "https://www.englishyard.com.br/",
+            "https://englishyard.com.br/",
         };
 
         if (!string.IsNullOrWhiteSpace(frontendUrl))
