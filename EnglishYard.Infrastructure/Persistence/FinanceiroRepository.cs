@@ -18,6 +18,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         bool Reposicao,
         bool Elegivel,
         decimal ValorPagamento,
+        Guid[] AlunoIds,
         string[] Alunos,
         string[] SituacoesAlunos);
 
@@ -70,7 +71,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
 
         const string teacherSql = """
             select p.id, p.nome, p.email, coalesce(p.dia_pagamento, 10), p.modelo_pagamento,
-                   p.tipo_chave_pix, p.chave_pix, p.banco
+                   p.tipo_chave_pix, p.chave_pix, p.banco, coalesce(p.eh_master, false), p.eh_master_desde
             from public.professoras p
             where p.id = @id;
             """;
@@ -83,6 +84,8 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         string? pixType;
         string? pixKey;
         string? bank;
+        bool teacherIsMaster;
+        DateOnly? teacherMasterSince;
 
         await using (var command = dataSource.CreateCommand(teacherSql))
         {
@@ -98,12 +101,27 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             pixType = GetNullableString(reader, 5);
             pixKey = GetNullableString(reader, 6);
             bank = GetNullableString(reader, 7);
+            teacherIsMaster = reader.GetBoolean(8);
+            teacherMasterSince = reader.IsDBNull(9) ? null : reader.GetFieldValue<DateOnly>(9);
         }
+
+        if (MasterRuleApplies(teacherIsMaster, teacherMasterSince, fimCompetencia))
+            paymentModel = "Professora master · 100% da aula";
 
         var rates = await ListarRatesAsync(professoraId, cancellationToken);
         var latestRate = RateForDate(rates, fimCompetencia);
         var schedules = await ListarSchedulesAsync(professoraId, competencia, fimCompetencia, cancellationToken);
         var realLessons = await ListarRealLessonsAsync(professoraId, competencia, fimCompetencia, cancellationToken);
+        var masterLessonValues = teacherIsMaster
+            ? await ListarValoresIntegraisPorAlunoAsync(
+                schedules.Select(item => item.AlunoId)
+                    .Concat(realLessons.SelectMany(item => item.AlunoIds))
+                    .Distinct()
+                    .ToArray(),
+                competencia,
+                fimCompetencia,
+                cancellationToken)
+            : new Dictionary<Guid, decimal>();
         var realBySlot = realLessons
             .Where(item => !item.Reposicao)
             .GroupBy(item => SlotKey(item.Data, item.Inicio, item.Fim))
@@ -125,7 +143,11 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 var participantNames = group.Select(item => item.AlunoNome).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray();
                 var type = participantNames.Length > 1 ? "Grupo" : "Individual";
                 var rate = RateForDate(rates, date);
-                var projected = type == "Grupo" ? rate.Grupo : rate.Individual;
+                var configuredProjected = type == "Grupo" ? rate.Grupo : rate.Individual;
+                var masterRuleApplies = MasterRuleApplies(teacherIsMaster, teacherMasterSince, date);
+                var projected = masterRuleApplies
+                    ? GetMasterProjectedValue(group.Select(item => item.AlunoId), masterLessonValues, configuredProjected)
+                    : configuredProjected;
                 var key = SlotKey(date, group.Key.Inicio, group.Key.Fim);
                 realBySlot.TryGetValue(key, out var real);
                 if (real is not null) matchedRealIds.Add(real.Id);
@@ -152,7 +174,10 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         {
             var rate = RateForDate(rates, real.Data);
             var type = ToTypeLabel(real.Tipo, real.Alunos.Length);
-            var baseRate = type == "Grupo" ? rate.Grupo : rate.Individual;
+            var configuredRate = type == "Grupo" ? rate.Grupo : rate.Individual;
+            var baseRate = MasterRuleApplies(teacherIsMaster, teacherMasterSince, real.Data)
+                ? GetMasterProjectedValue(real.AlunoIds, masterLessonValues, configuredRate)
+                : configuredRate;
             var projected = real.Reposicao ? 0m : baseRate;
             var realized = real.Elegivel ? (real.ValorPagamento > 0 ? real.ValorPagamento : baseRate) : 0m;
             entries.Add(new AulaPagamentoProfessoraResponse(
@@ -909,6 +934,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         const string sql = """
             select au.id, au.data_aula, au.hora_inicio, au.hora_fim, au.tipo_aula, au.status,
                    au.eh_reposicao, au.elegivel_pagamento, au.valor_pagamento,
+                   coalesce(array_agg(a.id order by a.nome) filter (where a.id is not null), array[]::uuid[]) as aluno_ids,
                    coalesce(array_agg(a.nome order by a.nome) filter (where a.id is not null), array[]::text[]) as alunos,
                    coalesce(array_agg(aa.status order by a.nome) filter (where aa.id is not null), array[]::text[]) as situacoes_alunos
             from public.aulas au
@@ -929,8 +955,91 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             result.Add(new RealLessonRow(
                 reader.GetGuid(0), reader.GetFieldValue<DateOnly>(1), reader.GetFieldValue<TimeOnly>(2), reader.GetFieldValue<TimeOnly>(3),
                 reader.GetString(4), reader.GetString(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetDecimal(8),
-                reader.GetFieldValue<string[]>(9), reader.GetFieldValue<string[]>(10)));
+                reader.GetFieldValue<Guid[]>(9), reader.GetFieldValue<string[]>(10), reader.GetFieldValue<string[]>(11)));
         return result;
+    }
+
+    private async Task<Dictionary<Guid, decimal>> ListarValoresIntegraisPorAlunoAsync(
+        IReadOnlyCollection<Guid> alunoIds,
+        DateOnly competencia,
+        DateOnly fimCompetencia,
+        CancellationToken cancellationToken)
+    {
+        if (alunoIds.Count == 0)
+            return new Dictionary<Guid, decimal>();
+
+        const string sql = """
+            with participantes as (
+                select unnest(@aluno_ids::uuid[]) as aluno_id
+            ),
+            valores as (
+                select
+                    participantes.aluno_id,
+                    greatest(coalesce(condicao.valor_mensalidade, 0), 0)
+                      - round(
+                          greatest(coalesce(condicao.valor_mensalidade, 0), 0)
+                          * coalesce(condicao.percentual_desconto, 0) / 100,
+                          2
+                        ) as mensalidade_liquida
+                from participantes
+                left join lateral (
+                    select c.valor_mensalidade, c.percentual_desconto
+                    from public.condicoes_mensalidade_alunos c
+                    where c.aluno_id = participantes.aluno_id
+                      and c.vigente_desde <= @fim_competencia
+                      and (c.vigente_ate is null or c.vigente_ate >= @competencia)
+                    order by c.vigente_desde desc
+                    limit 1
+                ) condicao on true
+            ),
+            quantidades as (
+                select
+                    participantes.aluno_id,
+                    count(*)::numeric as quantidade_aulas
+                from participantes
+                join public.horarios_recorrentes_alunos h
+                  on h.aluno_id = participantes.aluno_id
+                cross join lateral generate_series(@competencia::date, @fim_competencia::date, interval '1 day') as calendario(data_aula)
+                where h.data_inicio <= calendario.data_aula::date
+                  and (h.data_fim is null or h.data_fim >= calendario.data_aula::date)
+                  and h.dia_semana = extract(dow from calendario.data_aula)::smallint
+                group by participantes.aluno_id
+            )
+            select
+                valores.aluno_id,
+                case
+                    when coalesce(quantidades.quantidade_aulas, 0) > 0
+                      and valores.mensalidade_liquida > 0
+                    then round(valores.mensalidade_liquida / quantidades.quantidade_aulas, 2)
+                    else 0
+                end as valor_por_aula
+            from valores
+            left join quantidades using (aluno_id);
+            """;
+
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("aluno_ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid, alunoIds.ToArray());
+        command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
+        command.Parameters.AddWithValue("fim_competencia", NpgsqlDbType.Date, fimCompetencia);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new Dictionary<Guid, decimal>();
+        while (await reader.ReadAsync(cancellationToken))
+            result[reader.GetGuid(0)] = reader.GetDecimal(1);
+        return result;
+    }
+
+    private static bool MasterRuleApplies(bool isMaster, DateOnly? masterSince, DateOnly date) =>
+        isMaster && (!masterSince.HasValue || masterSince.Value <= date);
+
+    private static decimal GetMasterProjectedValue(
+        IEnumerable<Guid> alunoIds,
+        IReadOnlyDictionary<Guid, decimal> values,
+        decimal fallbackRate)
+    {
+        var total = alunoIds
+            .Distinct()
+            .Sum(id => values.TryGetValue(id, out var value) ? value : 0m);
+        return total > 0m ? total : fallbackRate;
     }
 
     private async Task<List<AjustePagamentoProfessoraResponse>> ListarAjustesAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)

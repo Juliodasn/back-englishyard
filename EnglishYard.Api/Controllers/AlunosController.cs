@@ -18,7 +18,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     public async Task<ActionResult<IReadOnlyList<AlunoResponse>>> Listar(CancellationToken cancellationToken)
     {
         Guid? professoraId = null;
-        if (User.IsInRole(PortalRoles.Professora))
+        if (!User.IsInRole(PortalRoles.Administrador) && User.IsInRole(PortalRoles.Professora))
         {
             professoraId = GetProfessoraId();
             if (!professoraId.HasValue)
@@ -44,7 +44,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
         CancellationToken cancellationToken = default)
     {
         Guid? professoraAcessoId = null;
-        if (User.IsInRole(PortalRoles.Professora))
+        if (!User.IsInRole(PortalRoles.Administrador) && User.IsInRole(PortalRoles.Professora))
         {
             professoraAcessoId = GetProfessoraId();
             if (!professoraAcessoId.HasValue)
@@ -83,7 +83,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
         CancellationToken cancellationToken = default)
     {
         Guid? professoraAcessoId = null;
-        if (User.IsInRole(PortalRoles.Professora))
+        if (!User.IsInRole(PortalRoles.Administrador) && User.IsInRole(PortalRoles.Professora))
         {
             professoraAcessoId = GetProfessoraId();
             if (!professoraAcessoId.HasValue)
@@ -114,7 +114,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
         CancellationToken cancellationToken)
     {
         Guid? professoraId = null;
-        if (User.IsInRole(PortalRoles.Professora))
+        if (!User.IsInRole(PortalRoles.Administrador) && User.IsInRole(PortalRoles.Professora))
         {
             professoraId = GetProfessoraId();
             if (!professoraId.HasValue) return Forbid();

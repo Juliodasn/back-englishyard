@@ -1602,31 +1602,24 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             replacement = reader.GetBoolean(3);
         }
 
-        var statuses = new List<string>();
-        const string statusSql = "select status from public.aula_alunos where aula_id = @id;";
+        var participants = new List<(Guid AlunoId, string Status)>();
+        const string statusSql = "select aluno_id, status from public.aula_alunos where aula_id = @id;";
         await using (var command = new NpgsqlCommand(statusSql, connection, transaction))
         {
             command.Parameters.AddWithValue("id", aulaId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken)) statuses.Add(reader.GetString(0));
+            while (await reader.ReadAsync(cancellationToken))
+                participants.Add((reader.GetGuid(0), reader.GetString(1)));
         }
 
+        var statuses = participants.Select(item => item.Status).ToList();
         var policy = await GetPaymentPolicyAsync(connection, transaction, date, cancellationToken);
-        var eligible = replacement
-            ? statuses.Any(status => status switch
-            {
-                "aplicada" => policy.ReposicaoRealizadaPaga,
-                "perdida" => policy.AulaPerdidaPaga,
-                _ => false
-            })
-            : statuses.Any(status => status switch
-            {
-                "aplicada" => policy.AulaAplicadaPaga,
-                "perdida" => policy.AulaPerdidaPaga,
-                "remarcada_aluno" => policy.RemarcadaAlunoPaga,
-                "remarcada_professora" => policy.RemarcadaProfessoraPaga,
-                _ => false
-            });
+        var eligibleParticipantIds = participants
+            .Where(item => ParticipantIsPayable(item.Status, replacement, policy))
+            .Select(item => item.AlunoId)
+            .Distinct()
+            .ToArray();
+        var eligible = eligibleParticipantIds.Length > 0;
 
         var lessonStatus = statuses.Any(status => status is "aplicada" or "perdida")
             ? "realizada"
@@ -1636,7 +1629,29 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     ? "remarcada"
                     : "agendada";
 
-        var rate = await GetTeacherRateAsync(connection, transaction, professoraId, date, type, cancellationToken);
+        var configuredRate = await GetTeacherRateAsync(connection, transaction, professoraId, date, type, cancellationToken);
+        var appliedValue = configuredRate;
+        var paymentValue = eligible ? configuredRate : 0m;
+
+        if (await IsMasterTeacherAsync(connection, transaction, professoraId, date, cancellationToken))
+        {
+            var participantIds = participants.Select(item => item.AlunoId).Distinct().ToArray();
+            var fullClassValue = await GetMasterLessonValueAsync(connection, transaction, participantIds, date, cancellationToken);
+            if (fullClassValue > 0m)
+                appliedValue = fullClassValue;
+
+            if (eligible)
+            {
+                var payableClassValue = await GetMasterLessonValueAsync(
+                    connection,
+                    transaction,
+                    eligibleParticipantIds,
+                    date,
+                    cancellationToken);
+                paymentValue = payableClassValue > 0m ? payableClassValue : configuredRate;
+            }
+        }
+
         const string updateSql = """
             update public.aulas
             set status = @status,
@@ -1650,11 +1665,28 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         await using var update = new NpgsqlCommand(updateSql, connection, transaction);
         update.Parameters.AddWithValue("status", lessonStatus);
         update.Parameters.AddWithValue("elegivel", eligible);
-        update.Parameters.AddWithValue("valor", rate);
-        update.Parameters.AddWithValue("pagamento", eligible ? rate : 0m);
+        update.Parameters.AddWithValue("valor", appliedValue);
+        update.Parameters.AddWithValue("pagamento", paymentValue);
         update.Parameters.AddWithValue("id", aulaId);
         await update.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    private static bool ParticipantIsPayable(string status, bool replacement, PaymentPolicy policy) =>
+        replacement
+            ? status switch
+            {
+                "aplicada" => policy.ReposicaoRealizadaPaga,
+                "perdida" => policy.AulaPerdidaPaga,
+                _ => false
+            }
+            : status switch
+            {
+                "aplicada" => policy.AulaAplicadaPaga,
+                "perdida" => policy.AulaPerdidaPaga,
+                "remarcada_aluno" => policy.RemarcadaAlunoPaga,
+                "remarcada_professora" => policy.RemarcadaProfessoraPaga,
+                _ => false
+            };
 
     private sealed record PaymentPolicy(
         bool AulaAplicadaPaga,
@@ -1708,6 +1740,94 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return 0m;
         return type == "grupo" ? reader.GetDecimal(1) : reader.GetDecimal(0);
+    }
+
+    private static async Task<bool> IsMasterTeacherAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid professoraId,
+        DateOnly date,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select coalesce(eh_master, false)
+               and (eh_master_desde is null or eh_master_desde <= @data)
+            from public.professoras
+            where id = @id;
+            """;
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("id", professoraId);
+        command.Parameters.AddWithValue("data", NpgsqlDbType.Date, date);
+        return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken) ?? false);
+    }
+
+    private static async Task<decimal> GetMasterLessonValueAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        IReadOnlyCollection<Guid> alunoIds,
+        DateOnly date,
+        CancellationToken cancellationToken)
+    {
+        if (alunoIds.Count == 0)
+            return 0m;
+
+        var inicioMes = new DateOnly(date.Year, date.Month, 1);
+        var fimMes = inicioMes.AddMonths(1).AddDays(-1);
+
+        const string sql = """
+            with participantes as (
+                select unnest(@aluno_ids::uuid[]) as aluno_id
+            ),
+            valores as (
+                select
+                    participantes.aluno_id,
+                    greatest(coalesce(condicao.valor_mensalidade, 0), 0)
+                      - round(
+                          greatest(coalesce(condicao.valor_mensalidade, 0), 0)
+                          * coalesce(condicao.percentual_desconto, 0) / 100,
+                          2
+                        ) as mensalidade_liquida
+                from participantes
+                left join lateral (
+                    select c.valor_mensalidade, c.percentual_desconto
+                    from public.condicoes_mensalidade_alunos c
+                    where c.aluno_id = participantes.aluno_id
+                      and c.vigente_desde <= @fim_mes
+                      and (c.vigente_ate is null or c.vigente_ate >= @inicio_mes)
+                    order by c.vigente_desde desc
+                    limit 1
+                ) condicao on true
+            ),
+            quantidades as (
+                select
+                    participantes.aluno_id,
+                    count(*)::numeric as quantidade_aulas
+                from participantes
+                join public.horarios_recorrentes_alunos h
+                  on h.aluno_id = participantes.aluno_id
+                cross join lateral generate_series(@inicio_mes::date, @fim_mes::date, interval '1 day') as calendario(data_aula)
+                where h.data_inicio <= calendario.data_aula::date
+                  and (h.data_fim is null or h.data_fim >= calendario.data_aula::date)
+                  and h.dia_semana = extract(dow from calendario.data_aula)::smallint
+                group by participantes.aluno_id
+            )
+            select coalesce(sum(
+                case
+                    when coalesce(quantidades.quantidade_aulas, 0) > 0
+                      and valores.mensalidade_liquida > 0
+                    then round(valores.mensalidade_liquida / quantidades.quantidade_aulas, 2)
+                    else 0
+                end
+            ), 0)
+            from valores
+            left join quantidades using (aluno_id);
+            """;
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("aluno_ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid, alunoIds.ToArray());
+        command.Parameters.AddWithValue("inicio_mes", NpgsqlDbType.Date, inicioMes);
+        command.Parameters.AddWithValue("fim_mes", NpgsqlDbType.Date, fimMes);
+        return Convert.ToDecimal(await command.ExecuteScalarAsync(cancellationToken) ?? 0m);
     }
 
     private static async Task InsertHistoryAsync(

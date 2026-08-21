@@ -31,7 +31,7 @@ public sealed class AutenticacaoController(AutenticacaoService service, Professo
         if (profile is null)
             return Unauthorized();
 
-        if (profile.TipoUsuario != PortalRoles.Professora || !profile.ProfessoraId.HasValue)
+        if (!profile.ProfessoraId.HasValue)
             return Ok(BuildMeuPerfilResponse(profile, null));
 
         try
@@ -197,7 +197,7 @@ public sealed class AutenticacaoController(AutenticacaoService service, Professo
         professora?.ValorAulaIndividual,
         professora?.ValorAulaGrupo,
         professora?.VigenteDesde,
-        profile.TipoUsuario == PortalRoles.Professora && profile.ProfessoraId.HasValue);
+        profile.ProfessoraId.HasValue);
 
     private Guid GetAuthUserId()
     {

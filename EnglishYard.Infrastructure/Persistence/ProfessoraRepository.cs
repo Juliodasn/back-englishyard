@@ -766,10 +766,14 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
             insert into public.perfis_usuarios (
                 usuario_auth_id, nome, email, tipo_usuario, professora_id,
                 ativo, deve_alterar_senha
-            ) values (
-                @usuario_auth_id, @nome, @email, 'Professora', @professora_id,
-                true, true
-            );
+            )
+            select
+                @usuario_auth_id, @nome, @email,
+                case when coalesce(p.eh_master, false) then 'Administrador' else 'Professora' end,
+                p.id, true, true
+            from public.professoras p
+            where p.id = @professora_id
+              and p.ativo = true;
             """;
 
         await using var command = dataSource.CreateCommand(sql);
@@ -804,7 +808,6 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
             inner join public.perfis_usuarios pu on pu.professora_id = p.id
             where lower(p.email) = lower(@email)
               and p.ativo = false
-              and pu.tipo_usuario = 'Professora'
             order by p.atualizado_em desc, pu.criado_em desc
             limit 1;
             """;

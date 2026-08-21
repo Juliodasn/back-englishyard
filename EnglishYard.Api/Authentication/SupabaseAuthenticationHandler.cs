@@ -76,7 +76,15 @@ public sealed class SupabaseAuthenticationHandler(
             };
 
             if (profile.ProfessoraId.HasValue)
+            {
                 claims.Add(new Claim(PortalClaimTypes.ProfessoraId, profile.ProfessoraId.Value.ToString()));
+
+                // Uma professora master usa Administrador como perfil principal para enxergar
+                // toda a escola, mas continua tendo identidade de professora para as rotas
+                // de perfil próprio e pagamento.
+                if (profile.TipoUsuario == PortalRoles.Administrador)
+                    claims.Add(new Claim(ClaimTypes.Role, PortalRoles.Professora));
+            }
 
             var identity = new ClaimsIdentity(claims, SchemeName);
             var principal = new ClaimsPrincipal(identity);

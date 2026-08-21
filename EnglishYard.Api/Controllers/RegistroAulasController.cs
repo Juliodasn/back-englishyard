@@ -158,7 +158,7 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
     private bool TryGetProfessoraFilter(out Guid? professoraId)
     {
         professoraId = null;
-        if (!User.IsInRole(PortalRoles.Professora)) return true;
+        if (User.IsInRole(PortalRoles.Administrador) || !User.IsInRole(PortalRoles.Professora)) return true;
 
         var value = User.FindFirstValue(PortalClaimTypes.ProfessoraId);
         if (!Guid.TryParse(value, out var parsed)) return false;

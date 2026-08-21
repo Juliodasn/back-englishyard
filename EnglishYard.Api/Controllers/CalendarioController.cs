@@ -49,7 +49,7 @@ public sealed class CalendarioController(CalendarioService service) : Controller
     private bool TryGetProfessoraFilter(out Guid? professoraId)
     {
         professoraId = null;
-        if (!User.IsInRole(PortalRoles.Professora))
+        if (User.IsInRole(PortalRoles.Administrador) || !User.IsInRole(PortalRoles.Professora))
             return true;
 
         var value = User.FindFirstValue(PortalClaimTypes.ProfessoraId);

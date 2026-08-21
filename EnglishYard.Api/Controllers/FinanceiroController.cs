@@ -48,7 +48,7 @@ public sealed class FinanceiroController(FinanceiroService service) : Controller
         [FromQuery] string? competencia,
         CancellationToken cancellationToken)
     {
-        if (User.IsInRole(PortalRoles.Professora) && GetProfessoraId() != professoraId)
+        if (!User.IsInRole(PortalRoles.Administrador) && GetProfessoraId() != professoraId)
             return Forbid();
 
         var result = await service.ObterDemonstrativoProfessoraAsync(professoraId, ParseCompetencia(competencia), cancellationToken);
