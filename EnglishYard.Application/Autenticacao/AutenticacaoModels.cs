@@ -70,6 +70,7 @@ public sealed record MeuPerfilResponse(
     string? ChavePix,
     string? Banco,
     decimal? ValorAulaIndividual,
+    decimal? ValorAulaDupla,
     decimal? ValorAulaGrupo,
     DateOnly? VigenteDesde,
     bool PodeEditarDadosProfissionais);

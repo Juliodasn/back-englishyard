@@ -15,6 +15,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.email, p.telefone, p.status, p.modelo_pagamento, p.dia_pagamento,
                 p.tipo_chave_pix, p.chave_pix, p.banco, p.observacoes, p.foto_url, p.ativo,
                 coalesce(v.valor_aula_individual, 0) as valor_aula_individual,
+                coalesce(v.valor_aula_dupla, v.valor_aula_grupo, 0) as valor_aula_dupla,
                 coalesce(v.valor_aula_grupo, 0) as valor_aula_grupo,
                 v.vigente_desde,
                 (select count(distinct a.id)::int
@@ -56,7 +57,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.criado_em, p.atualizado_em
             from public.professoras p
             left join lateral (
-                select valor_aula_individual, valor_aula_grupo, vigente_desde
+                select valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 from public.valores_aula_professoras
                 where professora_id = p.id
                 order by vigente_desde desc
@@ -99,6 +100,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.email, p.telefone, p.status, p.modelo_pagamento, p.dia_pagamento,
                 p.tipo_chave_pix, p.chave_pix, p.banco, p.observacoes, p.foto_url, p.ativo,
                 coalesce(v.valor_aula_individual, 0) as valor_aula_individual,
+                coalesce(v.valor_aula_dupla, v.valor_aula_grupo, 0) as valor_aula_dupla,
                 coalesce(v.valor_aula_grupo, 0) as valor_aula_grupo,
                 v.vigente_desde,
                 (select count(distinct a.id)::int
@@ -141,7 +143,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 count(*) over()::int as total_count
             from public.professoras p
             left join lateral (
-                select valor_aula_individual, valor_aula_grupo, vigente_desde
+                select valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 from public.valores_aula_professoras
                 where professora_id = p.id
                 order by vigente_desde desc
@@ -181,7 +183,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
         while (await reader.ReadAsync(cancellationToken))
         {
             professoras.Add(MapProfessora(reader));
-            total = reader.GetInt32(26);
+            total = reader.GetInt32(27);
         }
 
         return (professoras, total);
@@ -198,6 +200,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.email, p.telefone, p.status, p.modelo_pagamento, p.dia_pagamento,
                 p.tipo_chave_pix, p.chave_pix, p.banco, p.observacoes, p.foto_url, p.ativo,
                 coalesce(v.valor_aula_individual, 0) as valor_aula_individual,
+                coalesce(v.valor_aula_dupla, v.valor_aula_grupo, 0) as valor_aula_dupla,
                 coalesce(v.valor_aula_grupo, 0) as valor_aula_grupo,
                 v.vigente_desde,
                 (select count(distinct a.id)::int
@@ -239,7 +242,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.criado_em, p.atualizado_em
             from public.professoras p
             left join lateral (
-                select valor_aula_individual, valor_aula_grupo, vigente_desde
+                select valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 from public.valores_aula_professoras
                 where professora_id = p.id
                 order by vigente_desde desc
@@ -283,7 +286,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
         CancellationToken cancellationToken)
     {
         const string sql = """
-            select id, valor_aula_individual, valor_aula_grupo, vigente_desde, vigente_ate
+            select id, valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde, vigente_ate
             from public.valores_aula_professoras
             where professora_id = @professora_id
             order by vigente_desde desc;
@@ -298,8 +301,9 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 reader.GetGuid(0),
                 reader.GetDecimal(1),
                 reader.GetDecimal(2),
-                reader.GetFieldValue<DateOnly>(3),
-                reader.IsDBNull(4) ? null : reader.GetFieldValue<DateOnly>(4)));
+                reader.GetDecimal(3),
+                reader.GetFieldValue<DateOnly>(4),
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<DateOnly>(5)));
         }
         return result;
     }
@@ -345,9 +349,9 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
 
             const string insertValorSql = """
                 insert into public.valores_aula_professoras (
-                    professora_id, valor_aula_individual, valor_aula_grupo, vigente_desde
+                    professora_id, valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 ) values (
-                    @professora_id, @valor_aula_individual, @valor_aula_grupo, @vigente_desde
+                    @professora_id, @valor_aula_individual, @valor_aula_dupla, @valor_aula_grupo, @vigente_desde
                 );
                 """;
 
@@ -355,6 +359,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
             {
                 insertValor.Parameters.AddWithValue("professora_id", professoraId);
                 insertValor.Parameters.AddWithValue("valor_aula_individual", NpgsqlDbType.Numeric, request.ValorAulaIndividual);
+                insertValor.Parameters.AddWithValue("valor_aula_dupla", NpgsqlDbType.Numeric, request.ValorAulaDupla);
                 insertValor.Parameters.AddWithValue("valor_aula_grupo", NpgsqlDbType.Numeric, request.ValorAulaGrupo);
                 insertValor.Parameters.AddWithValue("vigente_desde", NpgsqlDbType.Date, request.VigenteDesde);
                 await insertValor.ExecuteNonQueryAsync(cancellationToken);
@@ -463,12 +468,13 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
 
             const string upsertValorSql = """
                 insert into public.valores_aula_professoras (
-                    professora_id, valor_aula_individual, valor_aula_grupo, vigente_desde
+                    professora_id, valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 ) values (
-                    @professora_id, @valor_aula_individual, @valor_aula_grupo, @vigente_desde
+                    @professora_id, @valor_aula_individual, @valor_aula_dupla, @valor_aula_grupo, @vigente_desde
                 )
                 on conflict (professora_id, vigente_desde) do update set
                     valor_aula_individual = excluded.valor_aula_individual,
+                    valor_aula_dupla = excluded.valor_aula_dupla,
                     valor_aula_grupo = excluded.valor_aula_grupo,
                     atualizado_em = now();
                 """;
@@ -476,6 +482,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
             {
                 upsertValor.Parameters.AddWithValue("professora_id", professoraId);
                 upsertValor.Parameters.AddWithValue("valor_aula_individual", NpgsqlDbType.Numeric, request.ValorAulaIndividual);
+                upsertValor.Parameters.AddWithValue("valor_aula_dupla", NpgsqlDbType.Numeric, request.ValorAulaDupla);
                 upsertValor.Parameters.AddWithValue("valor_aula_grupo", NpgsqlDbType.Numeric, request.ValorAulaGrupo);
                 upsertValor.Parameters.AddWithValue("vigente_desde", NpgsqlDbType.Date, request.VigenteDesde);
                 await upsertValor.ExecuteNonQueryAsync(cancellationToken);
@@ -834,6 +841,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.email, p.telefone, p.status, p.modelo_pagamento, p.dia_pagamento,
                 p.tipo_chave_pix, p.chave_pix, p.banco, p.observacoes, p.foto_url, p.ativo,
                 coalesce(v.valor_aula_individual, 0) as valor_aula_individual,
+                coalesce(v.valor_aula_dupla, v.valor_aula_grupo, 0) as valor_aula_dupla,
                 coalesce(v.valor_aula_grupo, 0) as valor_aula_grupo,
                 v.vigente_desde,
                 (select count(distinct a.id)::int
@@ -875,7 +883,7 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
                 p.criado_em, p.atualizado_em
             from public.professoras p
             left join lateral (
-                select valor_aula_individual, valor_aula_grupo, vigente_desde
+                select valor_aula_individual, valor_aula_dupla, valor_aula_grupo, vigente_desde
                 from public.valores_aula_professoras
                 where professora_id = p.id
                 order by vigente_desde desc
@@ -930,15 +938,16 @@ public sealed class ProfessoraRepository(NpgsqlDataSource dataSource) : IProfess
         FotoUrl = GetNullableString(reader, 14),
         Ativo = reader.GetBoolean(15),
         ValorAulaIndividual = reader.GetDecimal(16),
-        ValorAulaGrupo = reader.GetDecimal(17),
-        VigenteDesde = GetNullableDateOnly(reader, 18),
-        QuantidadeAlunos = reader.GetInt32(19),
-        QuantidadeAulas = reader.GetInt32(20),
-        ProximaAulaData = GetNullableDateOnly(reader, 21),
-        ProximaAulaHora = reader.IsDBNull(22) ? null : reader.GetFieldValue<TimeOnly>(22),
-        PossuiAcesso = reader.GetBoolean(23),
-        CriadoEm = reader.GetFieldValue<DateTimeOffset>(24),
-        AtualizadoEm = reader.GetFieldValue<DateTimeOffset>(25)
+        ValorAulaDupla = reader.GetDecimal(17),
+        ValorAulaGrupo = reader.GetDecimal(18),
+        VigenteDesde = GetNullableDateOnly(reader, 19),
+        QuantidadeAlunos = reader.GetInt32(20),
+        QuantidadeAulas = reader.GetInt32(21),
+        ProximaAulaData = GetNullableDateOnly(reader, 22),
+        ProximaAulaHora = reader.IsDBNull(23) ? null : reader.GetFieldValue<TimeOnly>(23),
+        PossuiAcesso = reader.GetBoolean(24),
+        CriadoEm = reader.GetFieldValue<DateTimeOffset>(25),
+        AtualizadoEm = reader.GetFieldValue<DateTimeOffset>(26)
     };
 
     private static string? GetNullableString(NpgsqlDataReader reader, int ordinal) =>

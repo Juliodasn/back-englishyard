@@ -68,6 +68,7 @@ public sealed class ProfessoraService(
             p.QuantidadeAlunos,
             p.QuantidadeAulas,
             p.ValorAulaIndividual,
+            p.ValorAulaDupla,
             p.ValorAulaGrupo,
             p.Status)).ToArray();
     }
@@ -348,7 +349,7 @@ public sealed class ProfessoraService(
         if (request.TipoChavePix is not null && !TiposChavePixPermitidos.Contains(request.TipoChavePix))
             throw new ProfessoraValidationException("Tipo de chave PIX inválido.");
 
-        if (request.ValorAulaIndividual < 0 || request.ValorAulaGrupo < 0)
+        if (request.ValorAulaIndividual < 0 || request.ValorAulaDupla < 0 || request.ValorAulaGrupo < 0)
             throw new ProfessoraValidationException("Os valores de aula não podem ser negativos.");
 
         if (request.DiaPagamento is < 1 or > 31)
@@ -372,7 +373,7 @@ public sealed class ProfessoraService(
         if (request.TipoChavePix is not null && !TiposChavePixPermitidos.Contains(request.TipoChavePix))
             throw new ProfessoraValidationException("Tipo de chave PIX inválido.");
 
-        if (request.ValorAulaIndividual < 0 || request.ValorAulaGrupo < 0)
+        if (request.ValorAulaIndividual < 0 || request.ValorAulaDupla < 0 || request.ValorAulaGrupo < 0)
             throw new ProfessoraValidationException("Os valores de aula não podem ser negativos.");
 
         if (request.DiaPagamento is < 1 or > 31)

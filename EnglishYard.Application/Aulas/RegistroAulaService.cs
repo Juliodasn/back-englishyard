@@ -35,7 +35,7 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
         if (request.HoraFim <= request.HoraInicio)
             throw new RegistroAulaValidationException("O horário final deve ser posterior ao horário inicial.");
 
-        var tipo = alunoIds.Length > 1 ? "grupo" : "individual";
+        var tipo = ObterTipoAula(alunoIds.Length);
 
         if (request.Observacao?.Trim().Length > 1000)
             throw new RegistroAulaValidationException("A observação pode ter no máximo 1000 caracteres.");
@@ -299,6 +299,14 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
             item.AlunoFotoUrl,
             item.ProfessoraFotoUrl);
     }
+
+
+    private static string ObterTipoAula(int quantidadeAlunos) => quantidadeAlunos switch
+    {
+        <= 1 => "individual",
+        2 => "dupla",
+        _ => "grupo"
+    };
 
     private static string MapStatusCode(string raw) => raw switch
     {

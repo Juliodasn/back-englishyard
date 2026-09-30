@@ -18,6 +18,7 @@ public sealed record CadastrarProfessoraRequest(
     string? Banco,
     string? Observacoes,
     decimal ValorAulaIndividual,
+    decimal ValorAulaDupla,
     decimal ValorAulaGrupo,
     DateOnly VigenteDesde);
 
@@ -35,6 +36,7 @@ public sealed record AtualizarProfessoraRequest(
     string? Banco,
     string? Observacoes,
     decimal ValorAulaIndividual,
+    decimal ValorAulaDupla,
     decimal ValorAulaGrupo,
     DateOnly VigenteDesde);
 
@@ -61,6 +63,7 @@ public sealed record ProfessoraResponse(
     string? FotoUrl,
     bool Ativo,
     decimal ValorAulaIndividual,
+    decimal ValorAulaDupla,
     decimal ValorAulaGrupo,
     DateOnly? VigenteDesde,
     int QuantidadeAlunos,
@@ -89,6 +92,7 @@ public sealed record ProfessoraResponse(
         professora.FotoUrl,
         professora.Ativo,
         professora.ValorAulaIndividual,
+        professora.ValorAulaDupla,
         professora.ValorAulaGrupo,
         professora.VigenteDesde,
         professora.QuantidadeAlunos,
@@ -104,6 +108,7 @@ public sealed record ProfessoraResponse(
 public sealed record ValorAulaProfessoraHistoricoResponse(
     Guid Id,
     decimal ValorAulaIndividual,
+    decimal ValorAulaDupla,
     decimal ValorAulaGrupo,
     DateOnly VigenteDesde,
     DateOnly? VigenteAte);
@@ -128,5 +133,6 @@ public sealed record ProfessoraExportacaoResponse(
     int QuantidadeAlunos,
     int QuantidadeAulas,
     decimal ValorAulaIndividual,
+    decimal ValorAulaDupla,
     decimal ValorAulaGrupo,
     string Status);

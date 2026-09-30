@@ -36,8 +36,12 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     end as status,
                     case coalesce(
                         real.tipo_aula,
-                        case when count(*) over (partition by p.id, d.data, h.hora_inicio, h.hora_fim) > 1 then 'grupo' else 'individual' end
-                    ) when 'grupo' then 'Grupo' else 'Individual' end as tipo,
+                        case count(*) over (partition by p.id, d.data, h.hora_inicio, h.hora_fim)
+                            when 1 then 'individual'
+                            when 2 then 'dupla'
+                            else 'grupo'
+                        end
+                    ) when 'dupla' then 'Dupla' when 'grupo' then 'Grupo' else 'Individual' end as tipo,
                     (real.aula_id is not null) as possui_registro_real,
                     case real.participante_status
                         when 'aplicada' then 'Aula aplicada'
@@ -102,7 +106,11 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                         when au.status = 'em_andamento' then 'Em andamento'
                         else 'Agendada'
                     end as status,
-                    case au.tipo_aula when 'grupo' then 'Grupo' else 'Individual' end as tipo,
+                    case count(*) over (partition by au.id)
+                        when 1 then case au.tipo_aula when 'dupla' then 'Dupla' when 'grupo' then 'Grupo' else 'Individual' end
+                        when 2 then 'Dupla'
+                        else 'Grupo'
+                    end as tipo,
                     true as possui_registro_real,
                     case aa.status
                         when 'aplicada' then 'Aula aplicada'
@@ -143,7 +151,11 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                         when au.status = 'cancelada' or aa.status = 'cancelada' then 'Cancelada'
                         else 'Agendada'
                     end as status,
-                    case au.tipo_aula when 'grupo' then 'Grupo' else 'Individual' end as tipo,
+                    case count(*) over (partition by au.id)
+                        when 1 then case au.tipo_aula when 'dupla' then 'Dupla' when 'grupo' then 'Grupo' else 'Individual' end
+                        when 2 then 'Dupla'
+                        else 'Grupo'
+                    end as tipo,
                     true as possui_registro_real,
                     case aa.status
                         when 'aplicada' then 'Reposição aplicada'

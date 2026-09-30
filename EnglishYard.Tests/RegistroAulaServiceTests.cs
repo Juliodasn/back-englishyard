@@ -41,6 +41,75 @@ public sealed class RegistroAulaServiceTests
     }
 
     [Fact]
+    public async Task AgendarAulaAvulsa_DoisAlunos_ClassificaAutomaticamenteComoDupla()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)), "agendado") with
+        {
+            OcorrenciaId = $"a:{Guid.NewGuid()}",
+            AulaId = Guid.NewGuid(),
+            HorarioRecorrenteId = null,
+            PossuiRegistroReal = true
+        };
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+        var segundoAlunoId = Guid.NewGuid();
+
+        await service.AgendarAulaAvulsaAsync(
+            new AgendarAulaAvulsaRequest(
+                occurrence.AlunoId,
+                occurrence.ProfessoraId,
+                occurrence.Data,
+                new TimeOnly(14, 0),
+                new TimeOnly(15, 0),
+                "grupo",
+                null,
+                [occurrence.AlunoId, segundoAlunoId]),
+            null,
+            true,
+            Guid.NewGuid(),
+            "Admin Teste",
+            CancellationToken.None);
+
+        Assert.NotNull(repository.LastStandaloneScheduleRequest);
+        Assert.Equal("dupla", repository.LastStandaloneScheduleRequest!.Tipo);
+        Assert.Equal(2, repository.LastStandaloneScheduleRequest.AlunoIds!.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task AgendarAulaAvulsa_TresAlunos_ClassificaAutomaticamenteComoGrupo()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)), "agendado") with
+        {
+            OcorrenciaId = $"a:{Guid.NewGuid()}",
+            AulaId = Guid.NewGuid(),
+            HorarioRecorrenteId = null,
+            PossuiRegistroReal = true
+        };
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+
+        await service.AgendarAulaAvulsaAsync(
+            new AgendarAulaAvulsaRequest(
+                occurrence.AlunoId,
+                occurrence.ProfessoraId,
+                occurrence.Data,
+                new TimeOnly(14, 0),
+                new TimeOnly(15, 0),
+                "individual",
+                null,
+                [occurrence.AlunoId, Guid.NewGuid(), Guid.NewGuid()]),
+            null,
+            true,
+            Guid.NewGuid(),
+            "Admin Teste",
+            CancellationToken.None);
+
+        Assert.NotNull(repository.LastStandaloneScheduleRequest);
+        Assert.Equal("grupo", repository.LastStandaloneScheduleRequest!.Tipo);
+        Assert.Equal(3, repository.LastStandaloneScheduleRequest.AlunoIds!.Distinct().Count());
+    }
+
+    [Fact]
     public async Task AgendarAulaAvulsa_Professora_NaoPermiteOutraProfessora()
     {
         var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)), "agendado");
@@ -275,7 +344,12 @@ public sealed class RegistroAulaServiceTests
                 HoraFim = request.HoraFim,
                 AlunoId = request.AlunoId,
                 ProfessoraId = request.ProfessoraId,
-                Tipo = request.Tipo == "grupo" ? "Grupo" : "Individual",
+                Tipo = request.Tipo switch
+                {
+                    "dupla" => "Dupla",
+                    "grupo" => "Grupo",
+                    _ => "Individual"
+                },
                 ParticipanteStatus = "agendado",
                 PossuiRegistroReal = true,
                 Observacao = request.Observacao

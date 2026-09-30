@@ -107,7 +107,7 @@ app.Use(async (context, next) =>
         {
             title = "Estrutura do banco de dados desatualizada",
             status = StatusCodes.Status503ServiceUnavailable,
-            detail = "A estrutura financeira necessária não foi encontrada. Execute, nesta ordem, as migrações 21_INTEGRIDADE_FINANCEIRA_E_HISTORICA.sql e 22_CONTROLE_SESSOES.sql."
+            detail = "A estrutura financeira necessária não foi encontrada. Execute, nesta ordem, as migrações 21_INTEGRIDADE_FINANCEIRA_E_HISTORICA.sql, 22_CONTROLE_SESSOES.sql e 23_AULA_DUPLA.sql."
         });
     }
 });

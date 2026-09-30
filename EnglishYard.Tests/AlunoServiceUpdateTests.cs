@@ -90,7 +90,7 @@ public sealed class AlunoServiceUpdateTests
     }
 
     [Fact]
-    public async Task AtualizarAsync_PermiteMesmoIntervaloExatoParaAulaEmGrupo()
+    public async Task AtualizarAsync_PermiteMesmoIntervaloExatoParaAulaCompartilhada()
     {
         var alunoId = Guid.NewGuid();
         var professoraId = Guid.NewGuid();

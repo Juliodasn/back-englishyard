@@ -17,7 +17,7 @@ public sealed class ProfessoraServiceFotoTests
         var response = await service.AtualizarAsync(professoraId, new AtualizarProfessoraRequest(
             "  Teacher Updated  ", "  Teacher Pro  ", new DateOnly(1990, 1, 2), " DOC-1 ",
             " 11999999999 ", "Ativa", "Por aula", 12, "E-mail", " teacher@example.com ",
-            " Bank ", " Notes ", 120m, 80m, new DateOnly(2026, 8, 10)), CancellationToken.None);
+            " Bank ", " Notes ", 120m, 100m, 80m, new DateOnly(2026, 8, 10)), CancellationToken.None);
 
         Assert.NotNull(repository.AtualizacaoPersistida);
         Assert.Equal("Teacher Updated", repository.AtualizacaoPersistida.Nome);
@@ -156,6 +156,7 @@ public sealed class ProfessoraServiceFotoTests
             FotoUrl = fotoUrl,
             Ativo = true,
             ValorAulaIndividual = AtualizacaoPersistida?.ValorAulaIndividual ?? 0,
+            ValorAulaDupla = AtualizacaoPersistida?.ValorAulaDupla ?? 0,
             ValorAulaGrupo = AtualizacaoPersistida?.ValorAulaGrupo ?? 0,
             VigenteDesde = AtualizacaoPersistida?.VigenteDesde,
             CriadoEm = DateTimeOffset.UtcNow,

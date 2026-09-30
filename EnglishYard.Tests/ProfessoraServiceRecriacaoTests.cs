@@ -69,6 +69,7 @@ public sealed class ProfessoraServiceRecriacaoTests
                 ChavePix = request.ChavePix,
                 Ativo = true,
                 ValorAulaIndividual = request.ValorAulaIndividual,
+                ValorAulaDupla = request.ValorAulaDupla,
                 ValorAulaGrupo = request.ValorAulaGrupo,
                 VigenteDesde = request.VigenteDesde,
                 CriadoEm = DateTimeOffset.UtcNow,

@@ -16,6 +16,6 @@
 - **Pausada**: não acessa a API, não recebe aulas e não registra ocorrências.
 - **Arquivada (`ativo=false`)**: histórico preservado; ao restaurar, volta como Pausada e exige reativação explícita e, se necessário, recriação do acesso.
 
-## Grupo/turma
+## Aula em dupla e grupo/turma
 
-Nesta versão, “grupo” significa alunos que compartilham professora, data e faixa de horário. Não existe uma turma fixa com identidade própria. Se a escola passar a operar turmas nomeadas com matrícula e vigência próprias, isso deverá ser introduzido como uma nova entidade, sem inferi-la dos horários existentes.
+Nesta versão, aulas compartilhadas são inferidas automaticamente quando os alunos usam a mesma professora, data e faixa de horário: **1 aluno = individual, 2 alunos = dupla e 3 ou mais = grupo**. Não existe uma turma fixa com identidade própria. Se a escola passar a operar turmas nomeadas com matrícula e vigência próprias, isso deverá ser introduzido como uma nova entidade, sem inferi-la dos horários existentes.

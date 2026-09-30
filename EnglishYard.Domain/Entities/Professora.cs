@@ -19,6 +19,7 @@ public sealed class Professora
     public string? FotoUrl { get; init; }
     public bool Ativo { get; init; }
     public decimal ValorAulaIndividual { get; init; }
+    public decimal ValorAulaDupla { get; init; }
     public decimal ValorAulaGrupo { get; init; }
     public DateOnly? VigenteDesde { get; init; }
     public int QuantidadeAlunos { get; init; }

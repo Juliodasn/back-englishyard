@@ -25,9 +25,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     a.nome as aluno_nome,
                     p.id as professora_id,
                     p.nome as professora_nome,
-                    case
-                        when count(*) over (partition by h.professora_id, h.hora_inicio, h.hora_fim) > 1 then 'Grupo'
-                        else 'Individual'
+                    case count(*) over (partition by h.professora_id, h.hora_inicio, h.hora_fim)
+                        when 1 then 'Individual'
+                        when 2 then 'Dupla'
+                        else 'Grupo'
                     end as tipo,
                     coalesce(real.participante_status, 'agendado') as participante_status,
                     false as eh_reposicao,
@@ -87,7 +88,11 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     a.nome as aluno_nome,
                     p.id as professora_id,
                     p.nome as professora_nome,
-                    case au.tipo_aula when 'grupo' then 'Grupo' else 'Individual' end as tipo,
+                    case count(*) over (partition by au.id)
+                        when 1 then case au.tipo_aula when 'dupla' then 'Dupla' when 'grupo' then 'Grupo' else 'Individual' end
+                        when 2 then 'Dupla'
+                        else 'Grupo'
+                    end as tipo,
                     aa.status as participante_status,
                     false as eh_reposicao,
                     true as possui_registro_real,
@@ -121,7 +126,11 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     a.nome as aluno_nome,
                     p.id as professora_id,
                     p.nome as professora_nome,
-                    case au.tipo_aula when 'grupo' then 'Grupo' else 'Individual' end as tipo,
+                    case count(*) over (partition by au.id)
+                        when 1 then case au.tipo_aula when 'dupla' then 'Dupla' when 'grupo' then 'Grupo' else 'Individual' end
+                        when 2 then 'Dupla'
+                        else 'Grupo'
+                    end as tipo,
                     aa.status as participante_status,
                     true as eh_reposicao,
                     true as possui_registro_real,
@@ -604,7 +613,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 }
             }
 
-            var tipo = alunoIds.Length > 1 ? "grupo" : "individual";
+            var tipo = GetLessonTypeCode(alunoIds.Length);
             const string insertLessonSql = """
                 insert into public.aulas (
                     professora_id, tipo_aula, titulo, descricao, data_aula, hora_inicio, hora_fim,
@@ -1328,7 +1337,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             }
         }
 
-        var type = await CountScheduledParticipantsAsync(connection, transaction, occurrence, cancellationToken) > 1 ? "grupo" : "individual";
+        var type = GetLessonTypeCode(await CountScheduledParticipantsAsync(connection, transaction, occurrence, cancellationToken));
         const string insertSql = """
             insert into public.aulas (
                 professora_id, tipo_aula, data_aula, hora_inicio, hora_fim,
@@ -1368,7 +1377,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             return;
 
         var participantCount = await CountScheduledParticipantsAsync(connection, transaction, occurrence, cancellationToken);
-        var type = participantCount > 1 ? "grupo" : "individual";
+        var type = GetLessonTypeCode(participantCount);
 
         const string sql = """
             update public.aulas
@@ -1612,6 +1621,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 participants.Add((reader.GetGuid(0), reader.GetString(1)));
         }
 
+        type = replacement ? "individual" : GetLessonTypeCode(participants.Select(item => item.AlunoId).Distinct().Count());
         var statuses = participants.Select(item => item.Status).ToList();
         var policy = await GetPaymentPolicyAsync(connection, transaction, date, cancellationToken);
         var eligibleParticipantIds = participants
@@ -1655,6 +1665,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         const string updateSql = """
             update public.aulas
             set status = @status,
+                tipo_aula = @tipo,
                 elegivel_pagamento = @elegivel,
                 valor_aula_aplicado = @valor,
                 valor_pagamento = @pagamento,
@@ -1664,12 +1675,21 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             """;
         await using var update = new NpgsqlCommand(updateSql, connection, transaction);
         update.Parameters.AddWithValue("status", lessonStatus);
+        update.Parameters.AddWithValue("tipo", type);
         update.Parameters.AddWithValue("elegivel", eligible);
         update.Parameters.AddWithValue("valor", appliedValue);
         update.Parameters.AddWithValue("pagamento", paymentValue);
         update.Parameters.AddWithValue("id", aulaId);
         await update.ExecuteNonQueryAsync(cancellationToken);
     }
+
+
+    private static string GetLessonTypeCode(int participantCount) => participantCount switch
+    {
+        <= 1 => "individual",
+        2 => "dupla",
+        _ => "grupo"
+    };
 
     private static bool ParticipantIsPayable(string status, bool replacement, PaymentPolicy policy) =>
         replacement
@@ -1726,7 +1746,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         CancellationToken cancellationToken)
     {
         const string sql = """
-            select valor_aula_individual, valor_aula_grupo
+            select valor_aula_individual, valor_aula_dupla, valor_aula_grupo
             from public.valores_aula_professoras
             where professora_id = @id
               and vigente_desde <= @data
@@ -1739,7 +1759,12 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         command.Parameters.AddWithValue("data", NpgsqlDbType.Date, date);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return 0m;
-        return type == "grupo" ? reader.GetDecimal(1) : reader.GetDecimal(0);
+        return type switch
+        {
+            "dupla" => reader.GetDecimal(1),
+            "grupo" => reader.GetDecimal(2),
+            _ => reader.GetDecimal(0)
+        };
     }
 
     private static async Task<bool> IsMasterTeacherAsync(

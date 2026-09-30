@@ -195,6 +195,7 @@ public sealed class AutenticacaoController(AutenticacaoService service, Professo
         professora?.ChavePix,
         professora?.Banco,
         professora?.ValorAulaIndividual,
+        professora?.ValorAulaDupla,
         professora?.ValorAulaGrupo,
         professora?.VigenteDesde,
         profile.ProfessoraId.HasValue);

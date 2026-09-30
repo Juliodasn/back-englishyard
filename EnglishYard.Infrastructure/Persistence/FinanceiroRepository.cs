@@ -6,7 +6,7 @@ namespace EnglishYard.Infrastructure.Persistence;
 
 public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinanceiroRepository
 {
-    private sealed record RateRow(DateOnly Desde, DateOnly? Ate, decimal Individual, decimal Grupo);
+    private sealed record RateRow(DateOnly Desde, DateOnly? Ate, decimal Individual, decimal Dupla, decimal Grupo);
     private sealed record ScheduleRow(Guid Id, short DiaSemana, TimeOnly Inicio, TimeOnly Fim, DateOnly DataInicio, DateOnly? DataFim, Guid AlunoId, string AlunoNome);
     private sealed record RealLessonRow(
         Guid Id,
@@ -141,9 +141,10 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             foreach (var group in schedulesForDate)
             {
                 var participantNames = group.Select(item => item.AlunoNome).Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray();
-                var type = participantNames.Length > 1 ? "Grupo" : "Individual";
+                var participantCount = group.Select(item => item.AlunoId).Distinct().Count();
+                var type = ToTypeLabel(string.Empty, participantCount);
                 var rate = RateForDate(rates, date);
-                var configuredProjected = type == "Grupo" ? rate.Grupo : rate.Individual;
+                var configuredProjected = GetRateForType(rate, type);
                 var masterRuleApplies = MasterRuleApplies(teacherIsMaster, teacherMasterSince, date);
                 var projected = masterRuleApplies
                     ? GetMasterProjectedValue(group.Select(item => item.AlunoId), masterLessonValues, configuredProjected)
@@ -161,7 +162,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                     date,
                     real?.Inicio ?? group.Key.Inicio,
                     real?.Fim ?? group.Key.Fim,
-                    real is null ? type : ToTypeLabel(real.Tipo, participantNames.Length),
+                    real is null ? type : ToTypeLabel(real.Tipo, real.AlunoIds.Distinct().Count()),
                     real is not null && real.Alunos.Length > 0 ? real.Alunos : participantNames,
                     real is null ? "Prevista" : ToLessonStatus(real.Status, real.Reposicao, real.SituacoesAlunos),
                     real is not null,
@@ -173,8 +174,8 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         foreach (var real in realLessons.Where(item => !matchedRealIds.Contains(item.Id)))
         {
             var rate = RateForDate(rates, real.Data);
-            var type = ToTypeLabel(real.Tipo, real.Alunos.Length);
-            var configuredRate = type == "Grupo" ? rate.Grupo : rate.Individual;
+            var type = ToTypeLabel(real.Tipo, real.AlunoIds.Distinct().Count());
+            var configuredRate = GetRateForType(rate, type);
             var baseRate = MasterRuleApplies(teacherIsMaster, teacherMasterSince, real.Data)
                 ? GetMasterProjectedValue(real.AlunoIds, masterLessonValues, configuredRate)
                 : configuredRate;
@@ -205,6 +206,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             pixKey,
             bank,
             latestRate.Individual,
+            latestRate.Dupla,
             latestRate.Grupo,
             $"{competencia:yyyy-MM}",
             entries.Count,
@@ -214,6 +216,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             frozen ? closing.Reposicoes : entries.Count(item => item.Status == "Reposição realizada"),
             entries.Count(item => item.Status.StartsWith("Remarcada", StringComparison.OrdinalIgnoreCase)),
             frozen ? closing.Individuais : entries.Count(item => item.Tipo == "Individual"),
+            frozen ? closing.Duplas : entries.Count(item => item.Tipo == "Dupla"),
             frozen ? closing.Grupos : entries.Count(item => item.Tipo == "Grupo"),
             entries.Sum(item => item.ValorPrevisto),
             displayedRealized,
@@ -552,8 +555,8 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
     public async Task<bool> AprovarFechamentoAsync(Guid professoraId,DateOnly competencia,Guid usuarioId,CancellationToken ct)
     {
         var s=await ObterDemonstrativoProfessoraAsync(professoraId,competencia,ct); if(s is null)return false;
-        const string sql="""insert into public.fechamentos_professoras(professora_id,competencia,quantidade_aulas_individuais,quantidade_aulas_grupo,quantidade_reposicoes,quantidade_aulas_perdidas,valor_aulas,valor_ajustes,valor_total,status,aprovado_em,aprovado_por) values(@p,@c,@i,@g,@r,@f,@a,@j,@t,'Aprovado',now(),@u) on conflict(professora_id,competencia) do update set quantidade_aulas_individuais=excluded.quantidade_aulas_individuais,quantidade_aulas_grupo=excluded.quantidade_aulas_grupo,quantidade_reposicoes=excluded.quantidade_reposicoes,quantidade_aulas_perdidas=excluded.quantidade_aulas_perdidas,valor_aulas=excluded.valor_aulas,valor_ajustes=excluded.valor_ajustes,valor_total=excluded.valor_total,status='Aprovado',aprovado_em=now(),aprovado_por=@u where fechamentos_professoras.status<>'Pago' returning id;""";
-        await using var cmd=dataSource.CreateCommand(sql); cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("i",s.AulasIndividuais);cmd.Parameters.AddWithValue("g",s.AulasGrupo);cmd.Parameters.AddWithValue("r",s.ReposicoesRealizadas);cmd.Parameters.AddWithValue("f",s.FaltasAluno);cmd.Parameters.AddWithValue("a",NpgsqlDbType.Numeric,s.ValorRealizado);cmd.Parameters.AddWithValue("j",NpgsqlDbType.Numeric,s.Ajustes);cmd.Parameters.AddWithValue("t",NpgsqlDbType.Numeric,s.ValorTotal);cmd.Parameters.AddWithValue("u",usuarioId); return await cmd.ExecuteScalarAsync(ct)is not null;
+        const string sql="""insert into public.fechamentos_professoras(professora_id,competencia,quantidade_aulas_individuais,quantidade_aulas_dupla,quantidade_aulas_grupo,quantidade_reposicoes,quantidade_aulas_perdidas,valor_aulas,valor_ajustes,valor_total,status,aprovado_em,aprovado_por) values(@p,@c,@i,@d,@g,@r,@f,@a,@j,@t,'Aprovado',now(),@u) on conflict(professora_id,competencia) do update set quantidade_aulas_individuais=excluded.quantidade_aulas_individuais,quantidade_aulas_dupla=excluded.quantidade_aulas_dupla,quantidade_aulas_grupo=excluded.quantidade_aulas_grupo,quantidade_reposicoes=excluded.quantidade_reposicoes,quantidade_aulas_perdidas=excluded.quantidade_aulas_perdidas,valor_aulas=excluded.valor_aulas,valor_ajustes=excluded.valor_ajustes,valor_total=excluded.valor_total,status='Aprovado',aprovado_em=now(),aprovado_por=@u where fechamentos_professoras.status<>'Pago' returning id;""";
+        await using var cmd=dataSource.CreateCommand(sql); cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("i",s.AulasIndividuais);cmd.Parameters.AddWithValue("d",s.AulasDupla);cmd.Parameters.AddWithValue("g",s.AulasGrupo);cmd.Parameters.AddWithValue("r",s.ReposicoesRealizadas);cmd.Parameters.AddWithValue("f",s.FaltasAluno);cmd.Parameters.AddWithValue("a",NpgsqlDbType.Numeric,s.ValorRealizado);cmd.Parameters.AddWithValue("j",NpgsqlDbType.Numeric,s.Ajustes);cmd.Parameters.AddWithValue("t",NpgsqlDbType.Numeric,s.ValorTotal);cmd.Parameters.AddWithValue("u",usuarioId); return await cmd.ExecuteScalarAsync(ct)is not null;
     }
 
     public async Task<bool> MarcarFechamentoPagoAsync(Guid professoraId,DateOnly competencia,MarcarFechamentoPagoRequest request,Guid usuarioId,CancellationToken ct)
@@ -798,6 +801,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 statement.Email,
                 statement.DiaPagamento,
                 statement.ValorAulaIndividual,
+                statement.ValorAulaDupla,
                 statement.ValorAulaGrupo,
                 statement.AulasPrevistas,
                 statement.AulasRealizadas,
@@ -806,6 +810,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 statement.ReposicoesRealizadas,
                 statement.AulasRemarcadas,
                 statement.AulasIndividuais,
+                statement.AulasDupla,
                 statement.AulasGrupo,
                 statement.ValorPrevisto,
                 statement.ValorRealizado,
@@ -876,7 +881,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
     private async Task<List<RateRow>> ListarRatesAsync(Guid professoraId, CancellationToken cancellationToken)
     {
         const string sql = """
-            select vigente_desde, vigente_ate, valor_aula_individual, valor_aula_grupo
+            select vigente_desde, vigente_ate, valor_aula_individual, valor_aula_dupla, valor_aula_grupo
             from public.valores_aula_professoras
             where professora_id = @id
             order by vigente_desde;
@@ -890,7 +895,8 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 reader.GetFieldValue<DateOnly>(0),
                 reader.IsDBNull(1) ? null : reader.GetFieldValue<DateOnly>(1),
                 reader.GetDecimal(2),
-                reader.GetDecimal(3)));
+                reader.GetDecimal(3),
+                reader.GetDecimal(4)));
         return result;
     }
 
@@ -1055,17 +1061,17 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         return result;
     }
 
-    private async Task<(string Status, DateOnly? DataPagamento, string? ComprovanteUrl, DateTimeOffset? AprovadoEm, DateTimeOffset? PagoEm, int Individuais, int Grupos, int Reposicoes, decimal ValorAulas, decimal ValorAjustes, decimal ValorTotal)> ObterClosingAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
+    private async Task<(string Status, DateOnly? DataPagamento, string? ComprovanteUrl, DateTimeOffset? AprovadoEm, DateTimeOffset? PagoEm, int Individuais, int Duplas, int Grupos, int Reposicoes, decimal ValorAulas, decimal ValorAjustes, decimal ValorTotal)> ObterClosingAsync(Guid professoraId, DateOnly competencia, CancellationToken cancellationToken)
     {
-        const string sql = "select status, data_pagamento, comprovante_url, aprovado_em, pago_em, quantidade_aulas_individuais, quantidade_aulas_grupo, quantidade_reposicoes, valor_aulas, valor_ajustes, valor_total from public.fechamentos_professoras where professora_id = @id and competencia = @competencia;";
+        const string sql = "select status, data_pagamento, comprovante_url, aprovado_em, pago_em, quantidade_aulas_individuais, quantidade_aulas_dupla, quantidade_aulas_grupo, quantidade_reposicoes, valor_aulas, valor_ajustes, valor_total from public.fechamentos_professoras where professora_id = @id and competencia = @competencia;";
         await using var command = dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("id", professoraId);
         command.Parameters.AddWithValue("competencia", NpgsqlDbType.Date, competencia);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken)) return ("Em conferência", null, null, null, null, 0, 0, 0, 0, 0, 0);
+        if (!await reader.ReadAsync(cancellationToken)) return ("Em conferência", null, null, null, null, 0, 0, 0, 0, 0, 0, 0);
         return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetFieldValue<DateOnly>(1), GetNullableString(reader, 2),
             reader.IsDBNull(3) ? null : reader.GetFieldValue<DateTimeOffset>(3), reader.IsDBNull(4) ? null : reader.GetFieldValue<DateTimeOffset>(4),
-            reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetDecimal(8), reader.GetDecimal(9), reader.GetDecimal(10));
+            reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8), reader.GetDecimal(9), reader.GetDecimal(10), reader.GetDecimal(11));
     }
 
     private async Task<Dictionary<Guid, IReadOnlyList<RecebimentoMensalidadeResponse>>> ListarRecebimentosAsync(
@@ -1098,12 +1104,30 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
     private static RateRow RateForDate(IReadOnlyList<RateRow> rates, DateOnly date)
     {
         var rate = rates.LastOrDefault(item => item.Desde <= date && (!item.Ate.HasValue || item.Ate.Value >= date));
-        return rate ?? rates.LastOrDefault(item => item.Desde <= date) ?? new RateRow(date, null, 0, 0);
+        return rate ?? rates.LastOrDefault(item => item.Desde <= date) ?? new RateRow(date, null, 0, 0, 0);
     }
 
     private static string SlotKey(DateOnly date, TimeOnly start, TimeOnly end) => $"{date:yyyyMMdd}|{start:HHmmss}|{end:HHmmss}";
 
-    private static string ToTypeLabel(string raw, int participants) => raw == "grupo" || participants > 1 ? "Grupo" : "Individual";
+    private static string ToTypeLabel(string raw, int participants) => participants switch
+    {
+        <= 0 => raw switch
+        {
+            "dupla" => "Dupla",
+            "grupo" => "Grupo",
+            _ => "Individual"
+        },
+        1 => "Individual",
+        2 => "Dupla",
+        _ => "Grupo"
+    };
+
+    private static decimal GetRateForType(RateRow rate, string type) => type switch
+    {
+        "Dupla" => rate.Dupla,
+        "Grupo" => rate.Grupo,
+        _ => rate.Individual
+    };
 
     private static string ToLessonStatus(string status, bool replacement, IReadOnlyList<string> participantStatuses)
     {
