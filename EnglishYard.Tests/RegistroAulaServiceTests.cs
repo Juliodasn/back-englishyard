@@ -173,6 +173,61 @@ public sealed class RegistroAulaServiceTests
     }
 
     [Fact]
+    public async Task RegistrarResultado_AulaPassada_PermiteFeriadoSemPagamento()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), "agendado");
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+
+        var result = await service.RegistrarResultadoAsync(
+            new RegistrarResultadoAulaRequest(occurrence.OcorrenciaId, ResultadoAulaCodigos.Feriado, "Feriado municipal"),
+            occurrence.ProfessoraId,
+            Guid.NewGuid(),
+            "Professora Teste",
+            CancellationToken.None);
+
+        Assert.Equal(ResultadoAulaCodigos.Feriado, repository.LastPersistedRequest?.Status);
+        Assert.Equal("Feriado municipal", repository.LastPersistedRequest?.Observacao);
+        Assert.Equal(ResultadoAulaCodigos.Feriado, result.StatusCodigo);
+        Assert.Equal("Não houve aula · Feriado", result.Status);
+        Assert.False(result.ContabilizaPagamento);
+    }
+
+    [Fact]
+    public async Task RegistrarResultado_AulaFutura_NaoPermiteFeriado()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)), "agendado");
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+
+        await Assert.ThrowsAsync<RegistroAulaValidationException>(() => service.RegistrarResultadoAsync(
+            new RegistrarResultadoAulaRequest(occurrence.OcorrenciaId, ResultadoAulaCodigos.Feriado, null),
+            occurrence.ProfessoraId,
+            Guid.NewGuid(),
+            "Professora Teste",
+            CancellationToken.None));
+
+        Assert.Null(repository.LastPersistedRequest);
+    }
+
+    [Fact]
+    public async Task RegistrarResultado_Reposicao_NaoPermiteFeriado()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), "agendado", replacement: true);
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+
+        await Assert.ThrowsAsync<RegistroAulaValidationException>(() => service.RegistrarResultadoAsync(
+            new RegistrarResultadoAulaRequest(occurrence.OcorrenciaId, ResultadoAulaCodigos.Feriado, null),
+            occurrence.ProfessoraId,
+            Guid.NewGuid(),
+            "Professora Teste",
+            CancellationToken.None));
+
+        Assert.Null(repository.LastPersistedRequest);
+    }
+
+    [Fact]
     public async Task RegistrarResultado_AulaPassada_PermiteFaltaDoAluno()
     {
         var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(-2)), "agendado");
@@ -302,6 +357,7 @@ public sealed class RegistroAulaServiceTests
             {
                 ResultadoAulaCodigos.Aplicada => "aplicada",
                 ResultadoAulaCodigos.FaltaAluno => "perdida",
+                ResultadoAulaCodigos.Feriado => "feriado",
                 ResultadoAulaCodigos.RemarcadaAluno => "remarcada_aluno",
                 ResultadoAulaCodigos.RemarcadaProfessora => "remarcada_professora",
                 _ => "agendado"

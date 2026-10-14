@@ -4,6 +4,7 @@ public static class ResultadoAulaCodigos
 {
     public const string Aplicada = "aplicada";
     public const string FaltaAluno = "falta_aluno";
+    public const string Feriado = "feriado";
     public const string RemarcadaAluno = "remarcada_aluno";
     public const string RemarcadaProfessora = "remarcada_professora";
     public const string Cancelada = "cancelada";
@@ -12,6 +13,7 @@ public static class ResultadoAulaCodigos
     {
         Aplicada,
         FaltaAluno,
+        Feriado,
         RemarcadaAluno,
         RemarcadaProfessora
     };

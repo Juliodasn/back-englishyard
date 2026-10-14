@@ -100,6 +100,9 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
         var ehFutura = inicio > agora;
         var ehRemarcacao = status is ResultadoAulaCodigos.RemarcadaAluno or ResultadoAulaCodigos.RemarcadaProfessora;
 
+        if (status == ResultadoAulaCodigos.Feriado && ocorrencia.EhReposicao)
+            throw new RegistroAulaValidationException("Uma reposição deve ser gerenciada na tela de Reposições, não como feriado.");
+
         if (ehFutura && !ehRemarcacao)
             throw new RegistroAulaValidationException("Aulas futuras só podem ser remarcadas pelo aluno ou pela professora.");
 
@@ -312,6 +315,7 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
     {
         "aplicada" => ResultadoAulaCodigos.Aplicada,
         "perdida" => ResultadoAulaCodigos.FaltaAluno,
+        "feriado" => ResultadoAulaCodigos.Feriado,
         "remarcada_aluno" => ResultadoAulaCodigos.RemarcadaAluno,
         "remarcada_professora" => ResultadoAulaCodigos.RemarcadaProfessora,
         "cancelada" => ResultadoAulaCodigos.Cancelada,
@@ -322,6 +326,7 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
     {
         "aplicada" => reposicao ? "Reposição aplicada" : "Aula aplicada",
         "perdida" => "Falta do aluno",
+        "feriado" => "Não houve aula · Feriado",
         "remarcada_aluno" => "Remarcada pelo aluno",
         "remarcada_professora" => "Remarcada pela professora",
         "cancelada" => "Cancelada",

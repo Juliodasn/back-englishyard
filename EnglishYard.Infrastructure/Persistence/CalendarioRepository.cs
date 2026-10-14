@@ -28,6 +28,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     p.id as professora_id,
                     p.nome as professora_nome,
                     case
+                        when real.participante_status = 'feriado' then 'Feriado'
                         when real.participante_status in ('aplicada', 'perdida') then 'Realizada'
                         when real.participante_status in ('remarcada_aluno', 'remarcada_professora') then 'Remarcada'
                         when real.aula_status = 'cancelada' or real.participante_status = 'cancelada' then 'Cancelada'
@@ -46,6 +47,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     case real.participante_status
                         when 'aplicada' then 'Aula aplicada'
                         when 'perdida' then 'Falta do aluno'
+                        when 'feriado' then 'Não houve aula · Feriado'
                         when 'remarcada_aluno' then 'Remarcada pelo aluno'
                         when 'remarcada_professora' then 'Remarcada pela professora'
                         when 'cancelada' then 'Aula cancelada'
@@ -100,6 +102,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     p.id as professora_id,
                     p.nome as professora_nome,
                     case
+                        when aa.status = 'feriado' then 'Feriado'
                         when aa.status in ('aplicada', 'perdida') then 'Realizada'
                         when aa.status in ('remarcada_aluno', 'remarcada_professora') then 'Remarcada'
                         when au.status = 'cancelada' or aa.status = 'cancelada' then 'Cancelada'
@@ -115,6 +118,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     case aa.status
                         when 'aplicada' then 'Aula aplicada'
                         when 'perdida' then 'Falta do aluno'
+                        when 'feriado' then 'Não houve aula · Feriado'
                         when 'remarcada_aluno' then 'Remarcada pelo aluno'
                         when 'remarcada_professora' then 'Remarcada pela professora'
                         when 'cancelada' then 'Aula cancelada'
@@ -160,6 +164,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     case aa.status
                         when 'aplicada' then 'Reposição aplicada'
                         when 'perdida' then 'Falta do aluno'
+                        when 'feriado' then 'Não houve aula · Feriado'
                         else 'Reposição agendada'
                     end as resultado,
                     true as eh_reposicao,

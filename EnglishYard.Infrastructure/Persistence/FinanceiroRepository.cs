@@ -1132,6 +1132,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
     private static string ToLessonStatus(string status, bool replacement, IReadOnlyList<string> participantStatuses)
     {
         if (replacement && participantStatuses.Any(item => item == "aplicada")) return "Reposição realizada";
+        if (participantStatuses.Count > 0 && participantStatuses.All(item => item == "feriado")) return "Feriado · sem aula";
         if (participantStatuses.Count > 0 && participantStatuses.All(item => item == "perdida")) return "Falta do aluno";
         if (participantStatuses.Any(item => item == "aplicada") && participantStatuses.Any(item => item == "perdida"))
             return "Realizada · Falta do aluno";
@@ -1140,6 +1141,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             return "Remarcada · aluno/professora";
         if (participantStatuses.Any(item => item == "remarcada_aluno")) return "Remarcada pelo aluno";
         if (participantStatuses.Any(item => item == "remarcada_professora")) return "Remarcada pela professora";
+        if (participantStatuses.Any(item => item == "feriado") && participantStatuses.All(item => item is "feriado" or "cancelada")) return "Feriado · sem aula";
         return status switch
         {
             "realizada" => "Realizada",

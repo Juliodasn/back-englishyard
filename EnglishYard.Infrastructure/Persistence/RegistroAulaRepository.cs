@@ -1633,9 +1633,9 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
 
         var lessonStatus = statuses.Any(status => status is "aplicada" or "perdida")
             ? "realizada"
-            : statuses.Count > 0 && statuses.All(status => status == "cancelada")
+            : statuses.Count > 0 && statuses.All(status => status is "cancelada" or "feriado")
                 ? "cancelada"
-                : statuses.Count > 0 && statuses.All(status => status is "remarcada_aluno" or "remarcada_professora" or "cancelada")
+                : statuses.Count > 0 && statuses.All(status => status is "remarcada_aluno" or "remarcada_professora" or "cancelada" or "feriado")
                     ? "remarcada"
                     : "agendada";
 
@@ -2088,6 +2088,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
     {
         ResultadoAulaCodigos.Aplicada => "aplicada",
         ResultadoAulaCodigos.FaltaAluno => "perdida",
+        ResultadoAulaCodigos.Feriado => "feriado",
         ResultadoAulaCodigos.RemarcadaAluno => "remarcada_aluno",
         ResultadoAulaCodigos.RemarcadaProfessora => "remarcada_professora",
         _ => throw new RegistroAulaValidationException("Status de aula inválido.")
@@ -2097,6 +2098,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
     {
         "aplicada" => ResultadoAulaCodigos.Aplicada,
         "perdida" => ResultadoAulaCodigos.FaltaAluno,
+        "feriado" => ResultadoAulaCodigos.Feriado,
         "remarcada_aluno" => ResultadoAulaCodigos.RemarcadaAluno,
         "remarcada_professora" => ResultadoAulaCodigos.RemarcadaProfessora,
         "cancelada" => ResultadoAulaCodigos.Cancelada,
