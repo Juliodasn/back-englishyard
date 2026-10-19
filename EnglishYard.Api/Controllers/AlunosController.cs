@@ -30,6 +30,41 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     }
 
 
+    // API restrita de horários: não expõe nem permite escrever informações financeiras/cadastrais.
+    [HttpGet("horarios")]
+    [Authorize(Roles = PortalRoles.Administrador + "," + PortalRoles.Professora)]
+    public async Task<IActionResult> ListarHorarios(CancellationToken cancellationToken)
+    {
+        var professoraId = User.IsInRole(PortalRoles.Administrador) ? (Guid?)null : GetProfessoraId();
+        if (!User.IsInRole(PortalRoles.Administrador) && !professoraId.HasValue) return Forbid();
+        return Ok(await service.ListarHorariosGerenciaveisAsync(professoraId, cancellationToken));
+    }
+
+    [HttpGet("{id:guid}/horarios")]
+    [Authorize(Roles = PortalRoles.Administrador + "," + PortalRoles.Professora)]
+    public async Task<IActionResult> ObterHorarios(Guid id, CancellationToken cancellationToken)
+    {
+        var professoraId = User.IsInRole(PortalRoles.Administrador) ? (Guid?)null : GetProfessoraId();
+        if (!User.IsInRole(PortalRoles.Administrador) && !professoraId.HasValue) return Forbid();
+        try { return Ok(await service.BuscarAgendaGerenciavelAsync(id, professoraId, cancellationToken)); }
+        catch (AlunoAcessoNegadoException) { return Forbid(); }
+        catch (AlunoNaoEncontradoException ex) { return Problem(ex.Message, statusCode: 404, title: "Aluno não encontrado"); }
+    }
+
+    [HttpPut("{id:guid}/horarios")]
+    [Authorize(Roles = PortalRoles.Administrador + "," + PortalRoles.Professora)]
+    public async Task<IActionResult> AlterarHorarios(
+        Guid id, [FromBody] AlterarGradeHorariosRequest request, CancellationToken cancellationToken)
+    {
+        var professoraId = User.IsInRole(PortalRoles.Administrador) ? (Guid?)null : GetProfessoraId();
+        if (!User.IsInRole(PortalRoles.Administrador) && !professoraId.HasValue) return Forbid();
+        try { return Ok(await service.AlterarSomenteHorariosAsync(id, professoraId, request, cancellationToken)); }
+        catch (AlunoAcessoNegadoException) { return Forbid(); }
+        catch (AlunoNaoEncontradoException ex) { return Problem(ex.Message, statusCode: 404, title: "Aluno não encontrado"); }
+        catch (AlunoValidationException ex) { return Problem(ex.Message, statusCode: 400, title: "Horários inválidos"); }
+        catch (AlunoConflitoException ex) { return Problem(ex.Message, statusCode: 409, title: "Conflito de horários"); }
+    }
+
     [HttpGet("paginado")]
     [Authorize(Roles = PortalRoles.Administrador)]
     [ProducesResponseType<AlunoListagemPaginadaResponse>(StatusCodes.Status200OK)]

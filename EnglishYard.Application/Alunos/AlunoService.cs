@@ -130,6 +130,114 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
         return new AgendaAlunoResponse(vigentes, programados, historico);
     }
 
+    public async Task<IReadOnlyList<AlunoHorarioResumoResponse>> ListarHorariosGerenciaveisAsync(
+        Guid? professoraId, CancellationToken cancellationToken) =>
+        await repository.ListarAlunosHorariosAsync(professoraId, cancellationToken);
+
+    public async Task<AgendaAlunoResponse> BuscarAgendaGerenciavelAsync(
+        Guid alunoId, Guid? professoraId, CancellationToken cancellationToken)
+    {
+        await VerificarAcessoAgendaAsync(alunoId, professoraId, cancellationToken);
+        var agenda = await BuscarAgendaAsync(alunoId, cancellationToken);
+        if (!professoraId.HasValue) return agenda;
+        return new AgendaAlunoResponse(
+            agenda.Vigentes.Where(h => h.ProfessoraId == professoraId.Value).ToArray(),
+            agenda.Programados.Where(h => h.ProfessoraId == professoraId.Value).ToArray(),
+            agenda.Historico.Where(h => h.ProfessoraId == professoraId.Value).ToArray());
+    }
+
+    public async Task<AgendaAlunoResponse> AlterarSomenteHorariosAsync(
+        Guid alunoId, Guid? professoraId, AlterarGradeHorariosRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || request.Horarios is null)
+            throw new AlunoValidationException("Informe os horários da nova grade.");
+        if (request.VigenteDesde <= DateOnly.FromDateTime(DateTime.Today))
+            throw new AlunoValidationException("A nova grade precisa começar a partir de amanhã.");
+
+        await VerificarAcessoAgendaAsync(alunoId, professoraId, cancellationToken);
+        var agenda = await BuscarAgendaAsync(alunoId, cancellationToken);
+        // Uma versão futura substitui toda a grade na mesma data; respeitar sua composição.
+        var referencia = agenda.Programados.Count > 0 ? agenda.Programados : agenda.Vigentes;
+        if (referencia.Count == 0)
+            throw new AlunoValidationException("O aluno não possui uma grade ativa para editar. Procure a administração.");
+
+        var responsaveisPermitidos = referencia.Select(h => h.ProfessoraId).ToHashSet();
+        var recebidos = request.Horarios;
+        if (recebidos.Any(h => !responsaveisPermitidos.Contains(h.ProfessoraId)
+            || (professoraId.HasValue && h.ProfessoraId != professoraId.Value)))
+            throw new AlunoValidationException("Não é permitido alterar a professora responsável por uma aula.");
+
+        var originaisEditaveis = referencia.Where(h => !professoraId.HasValue || h.ProfessoraId == professoraId.Value).ToArray();
+        if (originaisEditaveis.Length == 0)
+            throw new AlunoValidationException("Não existem horários desta professora na grade válida para alteração.");
+
+        // Edição de horário NÃO permite adicionar/remover aulas, trocar professora ou
+        // mudar carga horária (isso poderia afetar contratos, duplas, grupos e financeiro).
+        static string[] Assinatura(IReadOnlyCollection<(Guid ProfessoraId, int Minutos)> aulas) =>
+            aulas.Select(item => $"{item.ProfessoraId:N}:{item.Minutos}").OrderBy(x => x).ToArray();
+        var original = Assinatura(originaisEditaveis
+            .Select(h => (h.ProfessoraId, (int)(h.HoraFim - h.HoraInicio).TotalMinutes)).ToArray());
+        var recebido = Assinatura(recebidos
+            .Select(h => (h.ProfessoraId, (int)(h.HoraFim - h.HoraInicio).TotalMinutes)).ToArray());
+        if (!original.SequenceEqual(recebido))
+            throw new AlunoValidationException("Altere apenas os dias e horários, mantendo a professora, quantidade de aulas e duração original.");
+
+        var preservados = referencia.Where(h => professoraId.HasValue && h.ProfessoraId != professoraId.Value);
+        var horariosCompletos = recebidos.Select(h =>
+            new HorarioRecorrenteAlunoRequest(h.DiaSemana, h.HoraInicio, h.HoraFim,
+                h.ProfessoraId, request.VigenteDesde))
+            .Concat(preservados.Select(h =>
+                new HorarioRecorrenteAlunoRequest(h.DiaSemana, h.HoraInicio, h.HoraFim,
+                    h.ProfessoraId, request.VigenteDesde)))
+            .ToArray();
+        ValidateHorarios(horariosCompletos, exigirAoMenosUm: true);
+        await ValidarProfessorasEConflitosAsync(alunoId, horariosCompletos, cancellationToken);
+
+        // Aulas de dupla/grupo são representadas pelo mesmo intervalo para múltiplos
+        // alunos. Uma mudança isolada poderia converter a modalidade e afetar valores.
+        // Mantemos esse tipo de alteração no fluxo administrativo completo.
+        foreach (var anterior in originaisEditaveis)
+        {
+            if (recebidos.Any(h => h.ProfessoraId == anterior.ProfessoraId
+                && h.DiaSemana == anterior.DiaSemana
+                && h.HoraInicio == anterior.HoraInicio && h.HoraFim == anterior.HoraFim))
+                continue;
+            var referenciaData = anterior.DataInicio > DateOnly.FromDateTime(DateTime.Today)
+                ? anterior.DataInicio : DateOnly.FromDateTime(DateTime.Today);
+            if (await repository.ExisteAulaCompartilhadaAsync(alunoId, anterior.ProfessoraId,
+                    anterior.DiaSemana, anterior.HoraInicio, anterior.HoraFim, referenciaData, cancellationToken))
+                throw new AlunoValidationException("Este horário pertence a uma dupla ou grupo. Solicite à administração a alteração da turma.");
+        }
+        foreach (var novo in recebidos)
+        {
+            if (originaisEditaveis.Any(h => h.ProfessoraId == novo.ProfessoraId
+                && h.DiaSemana == novo.DiaSemana
+                && h.HoraInicio == novo.HoraInicio && h.HoraFim == novo.HoraFim))
+                continue;
+            if (await repository.ExisteAulaCompartilhadaAsync(alunoId, novo.ProfessoraId,
+                    novo.DiaSemana, novo.HoraInicio, novo.HoraFim, request.VigenteDesde, cancellationToken))
+                throw new AlunoValidationException("O novo horário coincide com uma dupla ou grupo. Solicite à administração.");
+        }
+
+        // O repositório bloqueia o aluno e confere a versão vigente/futura para
+        // impedir sobrescrever modificações simultâneas de outra professora.
+        var versao = agenda.Vigentes.Concat(agenda.Programados).Select(h => h.Id).ToArray();
+        if (!await repository.AtualizarApenasAgendaAsync(
+                alunoId, request.VigenteDesde, horariosCompletos, versao, cancellationToken))
+            throw new AlunoNaoEncontradoException("Aluno não encontrado ou inativo.");
+
+        return await BuscarAgendaGerenciavelAsync(alunoId, professoraId, cancellationToken);
+    }
+
+    private async Task VerificarAcessoAgendaAsync(Guid alunoId, Guid? professoraId, CancellationToken cancellationToken)
+    {
+        if (professoraId.HasValue
+            && !await repository.PossuiHorarioAtivoAsync(alunoId, professoraId.Value, cancellationToken))
+            throw new AlunoAcessoNegadoException("Você só pode gerenciar os horários dos seus próprios alunos.");
+        _ = await repository.BuscarPorIdAsync(alunoId, cancellationToken)
+            ?? throw new AlunoNaoEncontradoException("Aluno não encontrado ou inativo.");
+    }
+
     public Task<bool> ExcluirAsync(Guid alunoId, CancellationToken cancellationToken) =>
         repository.ExcluirAsync(alunoId, cancellationToken);
 
@@ -403,3 +511,5 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
 public sealed class AlunoValidationException(string message) : Exception(message);
 public sealed class AlunoConflitoException(string message) : Exception(message);
 public sealed class AlunoNaoEncontradoException(string message) : Exception(message);
+
+public sealed class AlunoAcessoNegadoException(string message) : Exception(message);

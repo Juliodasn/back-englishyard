@@ -142,6 +142,126 @@ public sealed class AlunoServiceUpdateTests
         Assert.Equal(5, agenda.Historico[0].DiaSemana);
     }
 
+    [Fact]
+    public async Task Horarios_ProfessoraAlteraApenasSuaGradeEPreservaHorariosDeOutraProfessora()
+    {
+        var alunoId = Guid.NewGuid();
+        var professora1 = Guid.NewGuid();
+        var professora2 = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var repository = new AlunoRepositoryFake(alunoId, professora1)
+        {
+            ProfessoraExtra = professora2,
+            Horarios =
+            [
+                new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1, new(8, 0), new(9, 0), professora1, "Tati", hoje.AddDays(-10), null, true),
+                new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 2, new(16, 0), new(17, 0), professora2, "Bia", hoje.AddDays(-10), null, true)
+            ]
+        };
+        var service = new AlunoService(repository, new StorageNotUsedFake());
+
+        var result = await service.AlterarSomenteHorariosAsync(alunoId, professora1,
+            new AlterarGradeHorariosRequest(hoje.AddDays(2),
+            [new AlterarHorarioItemRequest(3, new(10, 0), new(11, 0), professora1)]), CancellationToken.None);
+
+        Assert.Equal(2, repository.NovaGrade!.Count);
+        Assert.Contains(repository.NovaGrade, h => h.ProfessoraId == professora2 && h.DiaSemana == 2 && h.HoraInicio == new TimeOnly(16, 0));
+        Assert.Contains(repository.NovaGrade, h => h.ProfessoraId == professora1 && h.DiaSemana == 3 && h.HoraInicio == new TimeOnly(10, 0));
+        Assert.Single(result.Programados);
+        Assert.Equal(professora1, result.Programados[0].ProfessoraId);
+    }
+
+    [Fact]
+    public async Task Horarios_ProfessoraNaoPodeAlterarHorarioDeOutraProfessora()
+    {
+        var alunoId = Guid.NewGuid();
+        var professora1 = Guid.NewGuid();
+        var professora2 = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var repo = new AlunoRepositoryFake(alunoId, professora1) { ProfessoraExtra = professora2,
+            Horarios = [
+                new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1, new(8, 0), new(9, 0), professora1, "Tati", hoje.AddDays(-5), null, true),
+                new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 2, new(10, 0), new(11, 0), professora2, "Bia", hoje.AddDays(-5), null, true)
+            ] };
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+
+        await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professora1,
+            new AlterarGradeHorariosRequest(hoje.AddDays(1), [
+                new AlterarHorarioItemRequest(3, new(8, 0), new(9, 0), professora2)
+            ]), CancellationToken.None));
+        Assert.Null(repo.NovaGrade);
+    }
+
+    [Fact]
+    public async Task Horarios_BloqueiaMudancaDaCargaHorariaOuQuantidadeDeAulas()
+    {
+        var alunoId = Guid.NewGuid();
+        var professoraId = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var repo = new AlunoRepositoryFake(alunoId, professoraId)
+        {
+            Horarios = [new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1, new(8, 0), new(9, 0), professoraId, "Tati", hoje.AddDays(-7), null, true)]
+        };
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professoraId, new AlterarGradeHorariosRequest(hoje.AddDays(1),
+            [new AlterarHorarioItemRequest(1, new(8, 0), new(10, 0), professoraId)]), CancellationToken.None));
+        await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professoraId, new AlterarGradeHorariosRequest(hoje.AddDays(1), []), CancellationToken.None));
+        Assert.Null(repo.NovaGrade);
+    }
+
+    [Fact]
+    public async Task Horarios_BloqueiaMudancaQueDesfazAulaEmDupla()
+    {
+        var alunoId = Guid.NewGuid();
+        var professoraId = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var repo = new AlunoRepositoryFake(alunoId, professoraId)
+        {
+            HorarioCompartilhado = true,
+            Horarios = [new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1, new(8, 0), new(9, 0), professoraId, "Tati", hoje.AddDays(-7), null, true)]
+        };
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        var error = await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professoraId, new AlterarGradeHorariosRequest(hoje.AddDays(1),
+            [new AlterarHorarioItemRequest(3, new(8, 0), new(9, 0), professoraId)]), CancellationToken.None));
+        Assert.Contains("dupla ou grupo", error.Message);
+        Assert.Null(repo.NovaGrade);
+    }
+
+    [Fact]
+    public async Task Horarios_ProfessoraSemVinculoNaoPodeConsultarNemEditarAluno()
+    {
+        var alunoId = Guid.NewGuid();
+        var professora1 = Guid.NewGuid();
+        var professoraSemVinculo = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var repo = new AlunoRepositoryFake(alunoId, professora1)
+        {
+            Horarios = [new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1, new(8, 0), new(9, 0), professora1, "Tati", hoje.AddDays(-7), null, true)]
+        };
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        await Assert.ThrowsAsync<AlunoAcessoNegadoException>(() =>
+            service.BuscarAgendaGerenciavelAsync(alunoId, professoraSemVinculo, CancellationToken.None));
+        await Assert.ThrowsAsync<AlunoAcessoNegadoException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professoraSemVinculo, new AlterarGradeHorariosRequest(hoje.AddDays(1),
+            [new AlterarHorarioItemRequest(1, new(9, 0), new(10, 0), professoraSemVinculo)]), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Horarios_ExigeInicioFuturo()
+    {
+        var alunoId = Guid.NewGuid();
+        var professoraId = Guid.NewGuid();
+        var repo = new AlunoRepositoryFake(alunoId, professoraId);
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
+            alunoId, professoraId, new AlterarGradeHorariosRequest(DateOnly.FromDateTime(DateTime.Today),
+            [new AlterarHorarioItemRequest(1, new(8, 0), new(9, 0), professoraId)]), CancellationToken.None));
+    }
+
     private static AtualizarAlunoRequest CriarRequestBase() => new(
         Nome: "Student Updated",
         DataNascimento: new DateOnly(2010, 2, 3),
@@ -163,6 +283,30 @@ public sealed class AlunoServiceUpdateTests
         public AtualizarAlunoRequest? AtualizacaoPersistida { get; private set; }
         public ConflitoAgendaAlunoResponse? Conflito { get; init; }
         public IReadOnlyList<HorarioRecorrenteAlunoResponse> Horarios { get; init; } = [];
+        public Guid? ProfessoraExtra { get; init; }
+        public bool HorarioCompartilhado { get; init; }
+        public Task<bool> ExisteAulaCompartilhadaAsync(Guid id, Guid idProfessora,
+            short dia, TimeOnly horaInicio, TimeOnly horaFim, DateOnly data,
+            CancellationToken cancellationToken) => Task.FromResult(HorarioCompartilhado);
+
+        public IReadOnlyCollection<HorarioRecorrenteAlunoRequest>? NovaGrade { get; private set; }
+        private IReadOnlyList<HorarioRecorrenteAlunoResponse>? novosHorarios;
+
+        public Task<bool> PossuiHorarioAtivoAsync(Guid id, Guid professora, CancellationToken cancellationToken) =>
+            Task.FromResult(id == alunoId && (novosHorarios ?? Horarios).Any(h => h.ProfessoraId == professora && h.Ativo &&
+                (!h.DataFim.HasValue || h.DataFim >= DateOnly.FromDateTime(DateTime.Today))));
+
+        public Task<bool> AtualizarApenasAgendaAsync(Guid id, DateOnly vigenteDesde,
+            IReadOnlyCollection<HorarioRecorrenteAlunoRequest> horarios,
+            IReadOnlyCollection<Guid> versaoEsperada, CancellationToken cancellationToken)
+        {
+            if (id != alunoId) return Task.FromResult(false);
+            NovaGrade = horarios.ToArray();
+            novosHorarios = horarios.Select(h => new HorarioRecorrenteAlunoResponse(
+                Guid.NewGuid(), h.DiaSemana, h.HoraInicio, h.HoraFim,
+                h.ProfessoraId!.Value, "Professora", vigenteDesde, null, true)).ToArray();
+            return Task.FromResult(true);
+        }
 
         public Task<Aluno?> AtualizarAsync(Guid id, AtualizarAlunoRequest request, CancellationToken cancellationToken)
         {
@@ -176,10 +320,10 @@ public sealed class AlunoServiceUpdateTests
         public Task<bool> EmailExisteAsync(string email, Guid? ignorarAlunoId, CancellationToken cancellationToken) => Task.FromResult(false);
         public Task<Aluno?> BuscarPorIdAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult<Aluno?>(id == alunoId ? CreateAluno() : null);
         public Task<IReadOnlyList<HorarioRecorrenteAlunoResponse>> ListarHorariosRecorrentesAsync(Guid id, CancellationToken cancellationToken) =>
-            Task.FromResult(id == alunoId ? Horarios : (IReadOnlyList<HorarioRecorrenteAlunoResponse>)[]);
+            Task.FromResult(id == alunoId ? (novosHorarios ?? Horarios) : (IReadOnlyList<HorarioRecorrenteAlunoResponse>)[]);
         public Task<ConflitoAgendaAlunoResponse?> BuscarConflitoHorarioAsync(Guid? ignorarAlunoId, Guid idProfessora, short diaSemana, TimeOnly horaInicio, TimeOnly horaFim, DateOnly dataInicio, CancellationToken cancellationToken) =>
             Task.FromResult(Conflito);
-        public Task<bool> ProfessoraExisteAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(id == professoraId);
+        public Task<bool> ProfessoraExisteAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(id == professoraId || id == ProfessoraExtra);
         public Task<IReadOnlyList<Aluno>> ListarAsync(Guid? id, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<(IReadOnlyList<Aluno> Itens, int Total)> ListarPaginadoAsync(Guid? professoraAcessoId, string? busca, Guid? professoraFiltroId, string? status, short? diaSemana, int pagina, int tamanhoPagina, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<AlunoExportacaoResponse>> ListarExportacaoAsync(Guid? professoraAcessoId, string? busca, Guid? professoraFiltroId, string? status, short? diaSemana, CancellationToken cancellationToken) => throw new NotSupportedException();

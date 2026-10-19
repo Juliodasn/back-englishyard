@@ -5,6 +5,17 @@ namespace EnglishYard.Application.Alunos;
 public interface IAlunoRepository
 {
     Task<IReadOnlyList<Aluno>> ListarAsync(Guid? professoraId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AlunoHorarioResumoResponse>> ListarAlunosHorariosAsync(
+        Guid? professoraId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    Task<bool> PossuiHorarioAtivoAsync(Guid alunoId, Guid professoraId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    Task<bool> ExisteAulaCompartilhadaAsync(Guid alunoId, Guid professoraId, short diaSemana,
+        TimeOnly horaInicio, TimeOnly horaFim, DateOnly dataReferencia,
+        CancellationToken cancellationToken) => Task.FromResult(false);
+
+    Task<bool> AtualizarApenasAgendaAsync(Guid alunoId, DateOnly vigenteDesde,
+        IReadOnlyCollection<HorarioRecorrenteAlunoRequest> horarios, IReadOnlyCollection<Guid> versaoEsperada,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
+
     Task<(IReadOnlyList<Aluno> Itens, int Total)> ListarPaginadoAsync(
         Guid? professoraAcessoId,
         string? busca,

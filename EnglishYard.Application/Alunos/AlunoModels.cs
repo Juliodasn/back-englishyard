@@ -62,6 +62,23 @@ public sealed record AgendaAlunoResponse(
     IReadOnlyList<HorarioRecorrenteAlunoResponse> Programados,
     IReadOnlyList<HorarioRecorrenteAlunoResponse> Historico);
 
+// Respostas mínimas: professoras não recebem dados cadastrais ou financeiros do aluno.
+public sealed record AlunoHorarioResumoResponse(
+    Guid Id,
+    string Nome,
+    string? FotoUrl,
+    IReadOnlyList<HorarioRecorrenteAlunoResponse> Horarios);
+
+public sealed record AlterarHorarioItemRequest(
+    short DiaSemana,
+    TimeOnly HoraInicio,
+    TimeOnly HoraFim,
+    Guid ProfessoraId);
+
+public sealed record AlterarGradeHorariosRequest(
+    DateOnly VigenteDesde,
+    AlterarHorarioItemRequest[]? Horarios);
+
 public sealed record ConflitoAgendaAlunoResponse(
     Guid AlunoId,
     string AlunoNome,

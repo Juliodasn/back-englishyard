@@ -7,6 +7,145 @@ namespace EnglishYard.Infrastructure.Persistence;
 
 public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoRepository
 {
+    public async Task<IReadOnlyList<AlunoHorarioResumoResponse>> ListarAlunosHorariosAsync(
+        Guid? professoraId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select a.id, a.nome, a.foto_url,
+                   h.id, h.dia_semana, h.hora_inicio, h.hora_fim,
+                   h.professora_id, p.nome, h.data_inicio, h.data_fim, h.ativo
+            from public.alunos a
+            join public.horarios_recorrentes_alunos h on h.aluno_id = a.id
+                 and h.ativo = true
+                 and (h.data_fim is null or h.data_fim >= current_date)
+            join public.professoras p on p.id = h.professora_id
+            where a.ativo = true
+              and (@professora_id is null or h.professora_id = @professora_id)
+            order by a.nome, h.data_inicio, h.dia_semana, h.hora_inicio;
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.Add(new NpgsqlParameter("professora_id", NpgsqlDbType.Uuid)
+        {
+            Value = professoraId.HasValue ? professoraId.Value : DBNull.Value
+        });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var agrupados = new Dictionary<Guid, (string Nome, string? Foto, List<HorarioRecorrenteAlunoResponse> Horarios)>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = reader.GetGuid(0);
+            if (!agrupados.TryGetValue(id, out var grupo))
+                grupo = (reader.GetString(1), GetNullableString(reader, 2), []);
+            grupo.Horarios.Add(new HorarioRecorrenteAlunoResponse(
+                reader.GetGuid(3), reader.GetInt16(4), reader.GetFieldValue<TimeOnly>(5),
+                reader.GetFieldValue<TimeOnly>(6), reader.GetGuid(7), reader.GetString(8),
+                reader.GetFieldValue<DateOnly>(9),
+                reader.IsDBNull(10) ? null : reader.GetFieldValue<DateOnly>(10),
+                reader.GetBoolean(11)));
+            agrupados[id] = grupo;
+        }
+        return agrupados.Select(pair => new AlunoHorarioResumoResponse(
+            pair.Key, pair.Value.Nome, pair.Value.Foto, pair.Value.Horarios)).ToArray();
+    }
+
+    public async Task<bool> PossuiHorarioAtivoAsync(
+        Guid alunoId, Guid professoraId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select exists (
+                select 1 from public.alunos a
+                join public.horarios_recorrentes_alunos h on h.aluno_id = a.id
+                where a.id = @aluno_id and a.ativo = true
+                  and h.professora_id = @professora_id and h.ativo = true
+                  and (h.data_fim is null or h.data_fim >= current_date)
+            );
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("aluno_id", alunoId);
+        command.Parameters.AddWithValue("professora_id", professoraId);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false);
+    }
+
+    public async Task<bool> ExisteAulaCompartilhadaAsync(Guid alunoId, Guid professoraId,
+        short diaSemana, TimeOnly horaInicio, TimeOnly horaFim,
+        DateOnly dataReferencia, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select exists (
+                select 1 from public.horarios_recorrentes_alunos h
+                join public.alunos a on a.id = h.aluno_id and a.ativo = true
+                where h.aluno_id <> @aluno_id
+                  and h.professora_id = @professora_id
+                  and h.dia_semana = @dia_semana
+                  and h.hora_inicio = @hora_inicio and h.hora_fim = @hora_fim
+                  and h.ativo = true
+                  and (h.data_fim is null or h.data_fim >= @data_referencia)
+            );
+            """;
+        await using var command = dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("aluno_id", alunoId);
+        command.Parameters.AddWithValue("professora_id", professoraId);
+        command.Parameters.AddWithValue("dia_semana", NpgsqlDbType.Smallint, diaSemana);
+        command.Parameters.AddWithValue("hora_inicio", NpgsqlDbType.Time, horaInicio);
+        command.Parameters.AddWithValue("hora_fim", NpgsqlDbType.Time, horaFim);
+        command.Parameters.AddWithValue("data_referencia", NpgsqlDbType.Date, dataReferencia);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken) ?? false);
+    }
+
+    public async Task<bool> AtualizarApenasAgendaAsync(
+        Guid alunoId, DateOnly vigenteDesde,
+        IReadOnlyCollection<HorarioRecorrenteAlunoRequest> horarios,
+        IReadOnlyCollection<Guid> versaoEsperada, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            const string lockSql = """
+                select id from public.alunos
+                where id = @aluno_id and ativo = true for update;
+                """;
+            await using (var command = new NpgsqlCommand(lockSql, connection, transaction))
+            {
+                command.Parameters.AddWithValue("aluno_id", alunoId);
+                if (await command.ExecuteScalarAsync(cancellationToken) is null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return false;
+                }
+            }
+            const string versaoSql = """
+                select id from public.horarios_recorrentes_alunos
+                where aluno_id = @aluno_id and ativo = true
+                  and (data_fim is null or data_fim >= current_date)
+                order by id;
+                """;
+            await using (var command = new NpgsqlCommand(versaoSql, connection, transaction))
+            {
+                command.Parameters.AddWithValue("aluno_id", alunoId);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                var atuais = new List<Guid>();
+                while (await reader.ReadAsync(cancellationToken)) atuais.Add(reader.GetGuid(0));
+                if (!atuais.SequenceEqual(versaoEsperada.OrderBy(id => id)))
+                    throw new AlunoConflitoException("A grade foi alterada por outra pessoa. Atualize a tela antes de salvar.");
+            }
+            await SubstituirAgendaRecorrenteAsync(
+                connection, transaction, alunoId, vigenteDesde, horarios, cancellationToken);
+            const string touchSql = "update public.alunos set atualizado_em = now() where id = @aluno_id;";
+            await using (var command = new NpgsqlCommand(touchSql, connection, transaction))
+            {
+                command.Parameters.AddWithValue("aluno_id", alunoId);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<Aluno>> ListarAsync(Guid? professoraId, CancellationToken cancellationToken)
     {
         const string sql = """
