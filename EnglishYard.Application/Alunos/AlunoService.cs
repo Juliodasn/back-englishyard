@@ -134,6 +134,25 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
         Guid? professoraId, CancellationToken cancellationToken) =>
         await repository.ListarAlunosHorariosAsync(professoraId, cancellationToken);
 
+    // Paginação real no banco; filtro de professora é somente administrativo.
+    public async Task<AlunoHorarioListagemPaginadaResponse> ListarHorariosPaginadosAsync(
+        Guid? professoraAcessoId, Guid? professoraFiltroId, string? busca,
+        int pagina, int tamanhoPagina, CancellationToken cancellationToken)
+    {
+        pagina = Math.Max(1, pagina);
+        tamanhoPagina = tamanhoPagina is 10 or 25 or 50 ? tamanhoPagina : 10;
+        busca = string.IsNullOrWhiteSpace(busca) ? null : busca.Trim();
+        if (busca?.Length > 120)
+            throw new AlunoValidationException("A busca deve ter no máximo 120 caracteres.");
+        if (professoraAcessoId.HasValue)
+            professoraFiltroId = null; // Não aceitar seleção arbitrária de outra professora.
+
+        var (itens, total) = await repository.ListarAlunosHorariosPaginadoAsync(
+            professoraAcessoId, professoraFiltroId, busca, pagina, tamanhoPagina, cancellationToken);
+        var totalPaginas = total == 0 ? 0 : (int)Math.Ceiling(total / (double)tamanhoPagina);
+        return new AlunoHorarioListagemPaginadaResponse(itens, pagina, tamanhoPagina, total, totalPaginas);
+    }
+
     public async Task<AgendaAlunoResponse> BuscarAgendaGerenciavelAsync(
         Guid alunoId, Guid? professoraId, CancellationToken cancellationToken)
     {

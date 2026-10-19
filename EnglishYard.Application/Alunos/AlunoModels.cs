@@ -69,6 +69,13 @@ public sealed record AlunoHorarioResumoResponse(
     string? FotoUrl,
     IReadOnlyList<HorarioRecorrenteAlunoResponse> Horarios);
 
+public sealed record AlunoHorarioListagemPaginadaResponse(
+    IReadOnlyList<AlunoHorarioResumoResponse> Itens,
+    int Pagina,
+    int TamanhoPagina,
+    int Total,
+    int TotalPaginas);
+
 public sealed record AlterarHorarioItemRequest(
     short DiaSemana,
     TimeOnly HoraInicio,

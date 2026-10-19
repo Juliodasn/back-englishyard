@@ -47,6 +47,96 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             pair.Key, pair.Value.Nome, pair.Value.Foto, pair.Value.Horarios)).ToArray();
     }
 
+    // Consulta apenas os alunos da página solicitada e somente seus horários permitidos.
+    // O filtro também é aplicado no banco, não apenas ao resultado apresentado na tela.
+    public async Task<(IReadOnlyList<AlunoHorarioResumoResponse> Itens, int Total)> ListarAlunosHorariosPaginadoAsync(
+        Guid? professoraAcessoId,
+        Guid? professoraFiltroId,
+        string? busca,
+        int pagina,
+        int tamanhoPagina,
+        CancellationToken cancellationToken)
+    {
+        const string filtros = """
+            from public.alunos a
+            where a.ativo = true
+              and (@busca is null or strpos(lower(a.nome), lower(@busca)) > 0)
+              and exists (
+                select 1 from public.horarios_recorrentes_alunos permissao
+                where permissao.aluno_id = a.id
+                  and permissao.ativo = true
+                  and (permissao.data_fim is null or permissao.data_fim >= current_date)
+                  and (@professora_acesso_id is null or permissao.professora_id = @professora_acesso_id)
+                  and (@professora_filtro_id is null or permissao.professora_id = @professora_filtro_id)
+              )
+            """;
+        var totalSql = "select count(*) " + filtros;
+        var listaSql = """
+            with alunos_pagina as (
+                select a.id, a.nome, a.foto_url
+            """ + "\n" + filtros + "\n" + """
+                order by lower(a.nome), a.id
+                limit @tamanho_pagina offset @offset
+            )
+            select ap.id, ap.nome, ap.foto_url,
+                   h.id, h.dia_semana, h.hora_inicio, h.hora_fim,
+                   h.professora_id, p.nome, h.data_inicio, h.data_fim, h.ativo
+            from alunos_pagina ap
+            join public.horarios_recorrentes_alunos h on h.aluno_id = ap.id
+                and h.ativo = true
+                and (h.data_fim is null or h.data_fim >= current_date)
+                and (@professora_acesso_id is null or h.professora_id = @professora_acesso_id)
+                and (@professora_filtro_id is null or h.professora_id = @professora_filtro_id)
+            join public.professoras p on p.id = h.professora_id
+            order by lower(ap.nome), ap.id, h.data_inicio, h.dia_semana, h.hora_inicio;
+            """;
+
+        void AdicionarFiltros(NpgsqlCommand comando)
+        {
+            comando.Parameters.Add(new NpgsqlParameter("professora_acesso_id", NpgsqlDbType.Uuid)
+            {
+                Value = professoraAcessoId.HasValue ? professoraAcessoId.Value : DBNull.Value
+            });
+            comando.Parameters.Add(new NpgsqlParameter("professora_filtro_id", NpgsqlDbType.Uuid)
+            {
+                Value = professoraFiltroId.HasValue ? professoraFiltroId.Value : DBNull.Value
+            });
+            comando.Parameters.Add(new NpgsqlParameter("busca", NpgsqlDbType.Text)
+            {
+                Value = busca is null ? DBNull.Value : busca
+            });
+        }
+
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        int total;
+        await using (var count = new NpgsqlCommand(totalSql, connection))
+        {
+            AdicionarFiltros(count);
+            total = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken));
+        }
+        await using var command = new NpgsqlCommand(listaSql, connection);
+        AdicionarFiltros(command);
+        command.Parameters.AddWithValue("tamanho_pagina", tamanhoPagina);
+        command.Parameters.AddWithValue("offset", (long)(pagina - 1) * tamanhoPagina);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var agrupados = new Dictionary<Guid, (string Nome, string? Foto, List<HorarioRecorrenteAlunoResponse> Horarios)>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = reader.GetGuid(0);
+            if (!agrupados.TryGetValue(id, out var grupo))
+                grupo = (reader.GetString(1), GetNullableString(reader, 2), []);
+            grupo.Horarios.Add(new HorarioRecorrenteAlunoResponse(
+                reader.GetGuid(3), reader.GetInt16(4), reader.GetFieldValue<TimeOnly>(5),
+                reader.GetFieldValue<TimeOnly>(6), reader.GetGuid(7), reader.GetString(8),
+                reader.GetFieldValue<DateOnly>(9),
+                reader.IsDBNull(10) ? null : reader.GetFieldValue<DateOnly>(10),
+                reader.GetBoolean(11)));
+            agrupados[id] = grupo;
+        }
+        return (agrupados.Select(pair => new AlunoHorarioResumoResponse(
+            pair.Key, pair.Value.Nome, pair.Value.Foto, pair.Value.Horarios)).ToArray(), total);
+    }
+
     public async Task<bool> PossuiHorarioAtivoAsync(
         Guid alunoId, Guid professoraId, CancellationToken cancellationToken)
     {

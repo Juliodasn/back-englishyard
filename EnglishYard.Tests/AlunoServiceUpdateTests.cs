@@ -278,11 +278,57 @@ public sealed class AlunoServiceUpdateTests
         PercentualDesconto: 5m,
         Observacoes: "Notes");
 
+    [Fact]
+    public async Task HorariosPaginados_RespeitaFiltroEContagemDaPagina()
+    {
+        var professora = Guid.NewGuid();
+        var repo = new AlunoRepositoryFake(Guid.NewGuid(), professora);
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        var resposta = await service.ListarHorariosPaginadosAsync(null, professora, "  Maria  ", 3, 25, CancellationToken.None);
+        Assert.Equal(3, resposta.Pagina);
+        Assert.Equal(25, resposta.TamanhoPagina);
+        Assert.Equal(73, resposta.Total);
+        Assert.Equal(3, resposta.TotalPaginas);
+        Assert.Equal(professora, repo.UltimoFiltroProfessora);
+        Assert.Null(repo.UltimoAcessoProfessora);
+        Assert.Equal("Maria", repo.UltimaBusca);
+    }
+
+    [Fact]
+    public async Task HorariosPaginados_ProfessoraNaoRecebeFiltroDeOutraProfessora()
+    {
+        var professora = Guid.NewGuid();
+        var repo = new AlunoRepositoryFake(Guid.NewGuid(), professora);
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        await service.ListarHorariosPaginadosAsync(professora, Guid.NewGuid(), "", 0, 1000, CancellationToken.None);
+        Assert.Equal(professora, repo.UltimoAcessoProfessora);
+        Assert.Null(repo.UltimoFiltroProfessora);
+        Assert.Equal(1, repo.UltimaPagina);
+        Assert.Equal(10, repo.UltimoTamanhoPagina);
+    }
+
     private sealed class AlunoRepositoryFake(Guid alunoId, Guid professoraId) : IAlunoRepository
     {
         public AtualizarAlunoRequest? AtualizacaoPersistida { get; private set; }
         public ConflitoAgendaAlunoResponse? Conflito { get; init; }
         public IReadOnlyList<HorarioRecorrenteAlunoResponse> Horarios { get; init; } = [];
+        public Guid? UltimoAcessoProfessora { get; private set; }
+        public Guid? UltimoFiltroProfessora { get; private set; }
+        public string? UltimaBusca { get; private set; }
+        public int UltimaPagina { get; private set; }
+        public int UltimoTamanhoPagina { get; private set; }
+        public Task<(IReadOnlyList<AlunoHorarioResumoResponse> Itens, int Total)> ListarAlunosHorariosPaginadoAsync(
+            Guid? professoraAcessoId, Guid? professoraFiltroId, string? busca, int pagina,
+            int tamanhoPagina, CancellationToken cancellationToken)
+        {
+            UltimoAcessoProfessora = professoraAcessoId;
+            UltimoFiltroProfessora = professoraFiltroId;
+            UltimaBusca = busca;
+            UltimaPagina = pagina;
+            UltimoTamanhoPagina = tamanhoPagina;
+            return Task.FromResult<(IReadOnlyList<AlunoHorarioResumoResponse> Itens, int Total)>((Array.Empty<AlunoHorarioResumoResponse>(), 73));
+        }
+
         public Guid? ProfessoraExtra { get; init; }
         public bool HorarioCompartilhado { get; init; }
         public Task<bool> ExisteAulaCompartilhadaAsync(Guid id, Guid idProfessora,

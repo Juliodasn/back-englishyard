@@ -33,11 +33,28 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     // API restrita de horários: não expõe nem permite escrever informações financeiras/cadastrais.
     [HttpGet("horarios")]
     [Authorize(Roles = PortalRoles.Administrador + "," + PortalRoles.Professora)]
-    public async Task<IActionResult> ListarHorarios(CancellationToken cancellationToken)
+    [ProducesResponseType<AlunoHorarioListagemPaginadaResponse>(StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListarHorarios(
+        [FromQuery] string? search,
+        [FromQuery] Guid? professoraId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        CancellationToken cancellationToken = default)
     {
-        var professoraId = User.IsInRole(PortalRoles.Administrador) ? (Guid?)null : GetProfessoraId();
-        if (!User.IsInRole(PortalRoles.Administrador) && !professoraId.HasValue) return Forbid();
-        return Ok(await service.ListarHorariosGerenciaveisAsync(professoraId, cancellationToken));
+        var isAdmin = User.IsInRole(PortalRoles.Administrador);
+        var professoraAcessoId = isAdmin ? (Guid?)null : GetProfessoraId();
+        if (!isAdmin && !professoraAcessoId.HasValue) return Forbid();
+        try
+        {
+            return Ok(await service.ListarHorariosPaginadosAsync(
+                professoraAcessoId,
+                isAdmin ? professoraId : null,
+                search, page, pageSize, cancellationToken));
+        }
+        catch (AlunoValidationException ex)
+        {
+            return Problem(ex.Message, statusCode: 400, title: "Filtros inválidos");
+        }
     }
 
     [HttpGet("{id:guid}/horarios")]

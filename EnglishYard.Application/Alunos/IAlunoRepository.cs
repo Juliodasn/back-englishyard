@@ -7,6 +7,13 @@ public interface IAlunoRepository
     Task<IReadOnlyList<Aluno>> ListarAsync(Guid? professoraId, CancellationToken cancellationToken);
     Task<IReadOnlyList<AlunoHorarioResumoResponse>> ListarAlunosHorariosAsync(
         Guid? professoraId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    Task<(IReadOnlyList<AlunoHorarioResumoResponse> Itens, int Total)> ListarAlunosHorariosPaginadoAsync(
+        Guid? professoraAcessoId,
+        Guid? professoraFiltroId,
+        string? busca,
+        int pagina,
+        int tamanhoPagina,
+        CancellationToken cancellationToken) => throw new NotSupportedException();
     Task<bool> PossuiHorarioAtivoAsync(Guid alunoId, Guid professoraId, CancellationToken cancellationToken) => throw new NotSupportedException();
     Task<bool> ExisteAulaCompartilhadaAsync(Guid alunoId, Guid professoraId, short diaSemana,
         TimeOnly horaInicio, TimeOnly horaFim, DateOnly dataReferencia,
