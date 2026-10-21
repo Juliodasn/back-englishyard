@@ -851,7 +851,8 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     request.HoraInicio,
                     request.HoraFim,
                     cancellationToken,
-                    existingReplacementLessonId))
+                    existingReplacementLessonId,
+                    origin.AulaOrigemId))
             {
                 throw new RegistroAulaConflictException(
                     $"Já existe uma aula do aluno ou da professora que conflita com " +
@@ -1077,7 +1078,8 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         TimeOnly horaInicio,
         TimeOnly horaFim,
         CancellationToken cancellationToken,
-        Guid? ignorarAulaId = null)
+        Guid? ignorarAulaId = null,
+        Guid? aulaOrigemDuplaId = null)
     {
         const string sql = """
             with agenda_recorrente as (
@@ -1141,6 +1143,32 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                       and (au.professora_id = @professora_id or aa.aluno_id = @aluno_id)
                       and au.hora_inicio < @fim
                       and au.hora_fim > @inicio
+                      -- Duas participantes da mesma aula original podem repor juntas.
+                      -- Somente o MESMO intervalo e a MESMA professora são aceitos;
+                      -- outras aulas, horários parciais e reposições de outros grupos
+                      -- continuam sendo conflitos.
+                      and not (
+                          @aula_origem_dupla_id is not null
+                          and au.eh_reposicao = true
+                          and au.status = 'agendada'
+                          and au.professora_id = @professora_id
+                          and au.hora_inicio = @inicio
+                          and au.hora_fim = @fim
+                          and exists (
+                              select 1
+                              from public.reposicoes outra
+                              join public.aulas origem on origem.id = outra.aula_origem_id
+                              where outra.id = au.reposicao_origem_id
+                                and outra.aula_origem_id = @aula_origem_dupla_id
+                                and outra.aluno_id <> @aluno_id
+                                and outra.status = 'agendada'
+                                and (
+                                    select count(*)
+                                    from public.aula_alunos participante_origem
+                                    where participante_origem.aula_id = origem.id
+                                ) = 2
+                          )
+                      )
                 );
             """;
 
@@ -1153,6 +1181,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         command.Parameters.Add(new NpgsqlParameter("ignorar_aula_id", NpgsqlDbType.Uuid)
         {
             Value = ignorarAulaId.HasValue ? ignorarAulaId.Value : DBNull.Value
+        });
+        command.Parameters.Add(new NpgsqlParameter("aula_origem_dupla_id", NpgsqlDbType.Uuid)
+        {
+            Value = aulaOrigemDuplaId.HasValue ? aulaOrigemDuplaId.Value : DBNull.Value
         });
         return Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken) ?? false);
     }
