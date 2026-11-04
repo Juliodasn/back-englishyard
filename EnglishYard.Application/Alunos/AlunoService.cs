@@ -103,7 +103,7 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
             ?? throw new AlunoNaoEncontradoException("Aluno não encontrado ou inativo.");
 
         var horarios = await repository.ListarHorariosRecorrentesAsync(alunoId, cancellationToken);
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var hoje = HojeNaEscola();
 
         var vigentes = horarios
             .Where(h => h.Ativo
@@ -170,8 +170,8 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
     {
         if (request is null || request.Horarios is null)
             throw new AlunoValidationException("Informe os horários da nova grade.");
-        if (request.VigenteDesde <= DateOnly.FromDateTime(DateTime.Today))
-            throw new AlunoValidationException("A nova grade precisa começar a partir de amanhã.");
+        if (request.VigenteDesde < HojeNaEscola())
+            throw new AlunoValidationException("A nova grade não pode começar em uma data passada.");
 
         await VerificarAcessoAgendaAsync(alunoId, professoraId, cancellationToken);
         var agenda = await BuscarAgendaAsync(alunoId, cancellationToken);
@@ -221,8 +221,8 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
                 && h.DiaSemana == anterior.DiaSemana
                 && h.HoraInicio == anterior.HoraInicio && h.HoraFim == anterior.HoraFim))
                 continue;
-            var referenciaData = anterior.DataInicio > DateOnly.FromDateTime(DateTime.Today)
-                ? anterior.DataInicio : DateOnly.FromDateTime(DateTime.Today);
+            var referenciaData = anterior.DataInicio > HojeNaEscola()
+                ? anterior.DataInicio : HojeNaEscola();
             if (await repository.ExisteAulaCompartilhadaAsync(alunoId, anterior.ProfessoraId,
                     anterior.DiaSemana, anterior.HoraInicio, anterior.HoraFim, referenciaData, cancellationToken))
                 throw new AlunoValidationException("Este horário pertence a uma dupla ou grupo. Solicite à administração a alteração da turma.");
@@ -430,6 +430,11 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
         ValidateHorarios(request.HorariosRecorrentes ?? [], exigirAoMenosUm: true);
     }
 
+    // A data de vigência precisa seguir o calendário da escola, não o fuso do servidor.
+    private static DateOnly HojeNaEscola() => DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo")));
+
     private static void Validate(AtualizarAlunoRequest request)
     {
         ValidateCommon(
@@ -448,9 +453,9 @@ public sealed class AlunoService(IAlunoRepository repository, IImagemStorageGate
         if (!request.AgendaVigenteDesde.HasValue)
             throw new AlunoValidationException("Informe a data a partir da qual a nova grade semanal será válida.");
 
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
-        if (request.AgendaVigenteDesde.Value <= hoje)
-            throw new AlunoValidationException("Para preservar as aulas de hoje e o histórico, a nova grade deve começar a partir de amanhã.");
+        var hoje = HojeNaEscola();
+        if (request.AgendaVigenteDesde.Value < hoje)
+            throw new AlunoValidationException("A nova grade não pode começar em uma data passada.");
 
         ValidateHorarios(request.HorariosRecorrentes, exigirAoMenosUm: true);
     }

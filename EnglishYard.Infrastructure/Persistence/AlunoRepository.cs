@@ -17,7 +17,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             from public.alunos a
             join public.horarios_recorrentes_alunos h on h.aluno_id = a.id
                  and h.ativo = true
-                 and (h.data_fim is null or h.data_fim >= current_date)
+                 and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
             join public.professoras p on p.id = h.professora_id
             where a.ativo = true
               and (@professora_id is null or h.professora_id = @professora_id)
@@ -65,7 +65,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 select 1 from public.horarios_recorrentes_alunos permissao
                 where permissao.aluno_id = a.id
                   and permissao.ativo = true
-                  and (permissao.data_fim is null or permissao.data_fim >= current_date)
+                  and (permissao.data_fim is null or permissao.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                   and (@professora_acesso_id is null or permissao.professora_id = @professora_acesso_id)
                   and (@professora_filtro_id is null or permissao.professora_id = @professora_filtro_id)
               )
@@ -84,7 +84,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             from alunos_pagina ap
             join public.horarios_recorrentes_alunos h on h.aluno_id = ap.id
                 and h.ativo = true
-                and (h.data_fim is null or h.data_fim >= current_date)
+                and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 and (@professora_acesso_id is null or h.professora_id = @professora_acesso_id)
                 and (@professora_filtro_id is null or h.professora_id = @professora_filtro_id)
             join public.professoras p on p.id = h.professora_id
@@ -146,7 +146,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 join public.horarios_recorrentes_alunos h on h.aluno_id = a.id
                 where a.id = @aluno_id and a.ativo = true
                   and h.professora_id = @professora_id and h.ativo = true
-                  and (h.data_fim is null or h.data_fim >= current_date)
+                  and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
             );
             """;
         await using var command = dataSource.CreateCommand(sql);
@@ -206,7 +206,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             const string versaoSql = """
                 select id from public.horarios_recorrentes_alunos
                 where aluno_id = @aluno_id and ativo = true
-                  and (data_fim is null or data_fim >= current_date)
+                  and (data_fim is null or data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 order by id;
                 """;
             await using (var command = new NpgsqlCommand(versaoSql, connection, transaction))
@@ -218,6 +218,12 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 if (!atuais.SequenceEqual(versaoEsperada.OrderBy(id => id)))
                     throw new AlunoConflitoException("A grade foi alterada por outra pessoa. Atualize a tela antes de salvar.");
             }
+            // Aplicação no próprio dia somente antes de existir ocorrência real.
+            // Caso contrário uma aula de hoje desapareceria do calendário ao encerrar
+            // a vigência antiga ontem, com impacto em presença e pagamentos.
+            if (vigenteDesde == await HojeNaEscolaAsync(connection, transaction, cancellationToken))
+                await ImpedirMudancaDaGradeComAulaDeHojeAsync(connection, transaction, alunoId, cancellationToken);
+
             await SubstituirAgendaRecorrenteAsync(
                 connection, transaction, alunoId, vigenteDesde, horarios, cancellationToken);
             const string touchSql = "update public.alunos set atualizado_em = now() where id = @aluno_id;";
@@ -256,8 +262,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 join public.professoras pr on pr.id = hr.professora_id and pr.ativo = true
                 where hr.aluno_id = a.id
                   and hr.ativo = true
-                  and hr.data_inicio <= current_date
-                  and (hr.data_fim is null or hr.data_fim >= current_date)
+                  and hr.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                  and (hr.data_fim is null or hr.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                   and (@professora_id is null or hr.professora_id = @professora_id)
                 order by hr.data_inicio desc, hr.hora_inicio
                 limit 1
@@ -271,8 +277,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_filter.aluno_id = a.id
                       and hr_filter.professora_id = @professora_id
                       and hr_filter.ativo = true
-                      and hr_filter.data_inicio <= current_date
-                      and (hr_filter.data_fim is null or hr_filter.data_fim >= current_date)
+                      and hr_filter.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_filter.data_fim is null or hr_filter.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 )
                 or (
                     a.professora_id = @professora_id
@@ -281,8 +287,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                         from public.horarios_recorrentes_alunos hr_current
                         where hr_current.aluno_id = a.id
                           and hr_current.ativo = true
-                          and hr_current.data_inicio <= current_date
-                          and (hr_current.data_fim is null or hr_current.data_fim >= current_date)
+                          and hr_current.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                          and (hr_current.data_fim is null or hr_current.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                     )
                 )
               )
@@ -333,8 +339,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 join public.professoras pr on pr.id = hr.professora_id and pr.ativo = true
                 where hr.aluno_id = a.id
                   and hr.ativo = true
-                  and hr.data_inicio <= current_date
-                  and (hr.data_fim is null or hr.data_fim >= current_date)
+                  and hr.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                  and (hr.data_fim is null or hr.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                   and (@professora_filtro_id is null or hr.professora_id = @professora_filtro_id)
                 order by hr.data_inicio desc, hr.hora_inicio
                 limit 1
@@ -346,8 +352,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 where hr.aluno_id = a.id
                   and hr.professora_id = @professora_acesso_id
                   and hr.ativo = true
-                  and hr.data_inicio <= current_date
-                  and (hr.data_fim is null or hr.data_fim >= current_date)
+                  and hr.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                  and (hr.data_fim is null or hr.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 order by hr.data_inicio desc, hr.hora_inicio
                 limit 1
             ) agenda_acesso on @professora_acesso_id is not null
@@ -360,8 +366,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_access.aluno_id = a.id
                       and hr_access.professora_id = @professora_acesso_id
                       and hr_access.ativo = true
-                      and hr_access.data_inicio <= current_date
-                      and (hr_access.data_fim is null or hr_access.data_fim >= current_date)
+                      and hr_access.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_access.data_fim is null or hr_access.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 )
                 or (
                     a.professora_id = @professora_acesso_id
@@ -370,8 +376,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                         from public.horarios_recorrentes_alunos hr_access_current
                         where hr_access_current.aluno_id = a.id
                           and hr_access_current.ativo = true
-                          and hr_access_current.data_inicio <= current_date
-                          and (hr_access_current.data_fim is null or hr_access_current.data_fim >= current_date)
+                          and hr_access_current.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                          and (hr_access_current.data_fim is null or hr_access_current.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                     )
                 )
               )
@@ -383,8 +389,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_teacher.aluno_id = a.id
                       and hr_teacher.professora_id = @professora_filtro_id
                       and hr_teacher.ativo = true
-                      and hr_teacher.data_inicio <= current_date
-                      and (hr_teacher.data_fim is null or hr_teacher.data_fim >= current_date)
+                      and hr_teacher.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_teacher.data_fim is null or hr_teacher.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 )
                 or (
                     a.professora_id = @professora_filtro_id
@@ -393,8 +399,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                         from public.horarios_recorrentes_alunos hr_teacher_current
                         where hr_teacher_current.aluno_id = a.id
                           and hr_teacher_current.ativo = true
-                          and hr_teacher_current.data_inicio <= current_date
-                          and (hr_teacher_current.data_fim is null or hr_teacher_current.data_fim >= current_date)
+                          and hr_teacher_current.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                          and (hr_teacher_current.data_fim is null or hr_teacher_current.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                     )
                 )
               )
@@ -406,8 +412,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_day.aluno_id = a.id
                       and hr_day.dia_semana = @dia_semana
                       and hr_day.ativo = true
-                      and hr_day.data_inicio <= current_date
-                      and (hr_day.data_fim is null or hr_day.data_fim >= current_date)
+                      and hr_day.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_day.data_fim is null or hr_day.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                       and (@professora_acesso_id is null or hr_day.professora_id = @professora_acesso_id)
                 )
               )
@@ -488,8 +494,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             left join public.horarios_recorrentes_alunos h
               on h.aluno_id = a.id
              and h.ativo = true
-             and h.data_inicio <= current_date
-             and (h.data_fim is null or h.data_fim >= current_date)
+             and h.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+             and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
              and (@professora_acesso_id is null or h.professora_id = @professora_acesso_id)
              and (@professora_filtro_id is null or h.professora_id = @professora_filtro_id)
             left join public.professoras pr on pr.id = h.professora_id and pr.ativo = true
@@ -502,8 +508,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_access.aluno_id = a.id
                       and hr_access.professora_id = @professora_acesso_id
                       and hr_access.ativo = true
-                      and hr_access.data_inicio <= current_date
-                      and (hr_access.data_fim is null or hr_access.data_fim >= current_date)
+                      and hr_access.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_access.data_fim is null or hr_access.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 )
                 or (
                     a.professora_id = @professora_acesso_id
@@ -512,8 +518,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                         from public.horarios_recorrentes_alunos hr_access_current
                         where hr_access_current.aluno_id = a.id
                           and hr_access_current.ativo = true
-                          and hr_access_current.data_inicio <= current_date
-                          and (hr_access_current.data_fim is null or hr_access_current.data_fim >= current_date)
+                          and hr_access_current.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                          and (hr_access_current.data_fim is null or hr_access_current.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                     )
                 )
               )
@@ -525,8 +531,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_teacher.aluno_id = a.id
                       and hr_teacher.professora_id = @professora_filtro_id
                       and hr_teacher.ativo = true
-                      and hr_teacher.data_inicio <= current_date
-                      and (hr_teacher.data_fim is null or hr_teacher.data_fim >= current_date)
+                      and hr_teacher.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_teacher.data_fim is null or hr_teacher.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 )
                 or (
                     a.professora_id = @professora_filtro_id
@@ -535,8 +541,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                         from public.horarios_recorrentes_alunos hr_teacher_current
                         where hr_teacher_current.aluno_id = a.id
                           and hr_teacher_current.ativo = true
-                          and hr_teacher_current.data_inicio <= current_date
-                          and (hr_teacher_current.data_fim is null or hr_teacher_current.data_fim >= current_date)
+                          and hr_teacher_current.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                          and (hr_teacher_current.data_fim is null or hr_teacher_current.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                     )
                 )
               )
@@ -548,8 +554,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                     where hr_day.aluno_id = a.id
                       and hr_day.dia_semana = @dia_semana
                       and hr_day.ativo = true
-                      and hr_day.data_inicio <= current_date
-                      and (hr_day.data_fim is null or hr_day.data_fim >= current_date)
+                      and hr_day.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                      and (hr_day.data_fim is null or hr_day.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                       and (@professora_acesso_id is null or hr_day.professora_id = @professora_acesso_id)
                 )
               )
@@ -884,6 +890,9 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 var vigenteDesde = request.AgendaVigenteDesde
                     ?? throw new InvalidOperationException("A atualização da agenda está sem data de vigência.");
 
+                if (vigenteDesde == await HojeNaEscolaAsync(connection, transaction, cancellationToken))
+                    await ImpedirMudancaDaGradeComAulaDeHojeAsync(connection, transaction, alunoId, cancellationToken);
+
                 await SubstituirAgendaRecorrenteAsync(
                     connection,
                     transaction,
@@ -952,7 +961,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             const string desativarHorariosSql = """
                 update public.horarios_recorrentes_alunos
                 set ativo = false,
-                    data_fim = coalesce(data_fim, greatest(data_inicio, current_date)),
+                    data_fim = coalesce(data_fim, greatest(data_inicio, (now() at time zone 'America/Sao_Paulo')::date)),
                     atualizado_em = now()
                 where aluno_id = @aluno_id
                   and ativo = true;
@@ -1081,8 +1090,8 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 join public.professoras pr on pr.id = hr.professora_id and pr.ativo = true
                 where hr.aluno_id = a.id
                   and hr.ativo = true
-                  and hr.data_inicio <= current_date
-                  and (hr.data_fim is null or hr.data_fim >= current_date)
+                  and hr.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                  and (hr.data_fim is null or hr.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                 order by hr.data_inicio desc, hr.hora_inicio
                 limit 1
             ) agenda on true
@@ -1093,6 +1102,35 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
         command.Parameters.AddWithValue("id", id);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? MapAluno(reader) : null;
+    }
+
+    private static async Task<DateOnly> HojeNaEscolaAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "select (now() at time zone 'America/Sao_Paulo')::date", connection, transaction);
+        return (DateOnly)(await command.ExecuteScalarAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Não foi possível consultar a data da escola."));
+    }
+
+    private static async Task ImpedirMudancaDaGradeComAulaDeHojeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid alunoId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select exists (
+                select 1 from public.aula_alunos aa
+                join public.aulas au on au.id = aa.aula_id
+                where aa.aluno_id = @aluno_id
+                  and au.status <> 'cancelada'
+                  and aa.status <> 'cancelada'
+                  and au.data_aula = (now() at time zone 'America/Sao_Paulo')::date
+            );
+            """;
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("aluno_id", alunoId);
+        if (Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken)))
+            throw new AlunoConflitoException(
+                "Já existe aula registrada hoje neste aluno. Para preservar o lançamento, use a remarcação da aula ou programe a nova grade para amanhã.");
     }
 
     private static async Task SubstituirAgendaRecorrenteAsync(
@@ -1113,12 +1151,27 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
             delete from public.horarios_recorrentes_alunos
             where aluno_id = @aluno_id
               and ativo = true
-              and data_inicio > current_date;
+              and data_inicio > (now() at time zone 'America/Sao_Paulo')::date;
             """;
         await using (var removerFuturas = new NpgsqlCommand(removerFuturasSql, connection, transaction))
         {
             removerFuturas.Parameters.AddWithValue("aluno_id", alunoId);
             await removerFuturas.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Se a primeira grade foi cadastrada hoje e ainda não originou aula real,
+        // substituí-la em vez de deixá-la sobreposta à nova versão de hoje.
+        const string removerDeHojeSql = """
+            delete from public.horarios_recorrentes_alunos
+            where aluno_id = @aluno_id and ativo = true
+              and data_inicio = @vigente_desde
+              and @vigente_desde = (now() at time zone 'America/Sao_Paulo')::date;
+            """;
+        await using (var removerDeHoje = new NpgsqlCommand(removerDeHojeSql, connection, transaction))
+        {
+            removerDeHoje.Parameters.AddWithValue("aluno_id", alunoId);
+            removerDeHoje.Parameters.AddWithValue("vigente_desde", NpgsqlDbType.Date, vigenteDesde);
+            await removerDeHoje.ExecuteNonQueryAsync(cancellationToken);
         }
 
         // Ao substituir uma alteração futura já programada, a versão que continua valendo
@@ -1130,9 +1183,9 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                 atualizado_em = now()
             where aluno_id = @aluno_id
               and ativo = true
-              and data_inicio <= current_date
+              and data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
               and data_fim is not null
-              and data_fim >= current_date;
+              and data_fim >= (now() at time zone 'America/Sao_Paulo')::date;
             """;
         await using (var reabrirAtual = new NpgsqlCommand(reabrirAtualSql, connection, transaction))
         {
@@ -1229,7 +1282,7 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
         // Se a grade aberta já está valendo, salvar os mesmos horários não cria uma
         // versão histórica redundante. Se ela ainda é futura, a data de vigência faz
         // parte da alteração e precisa ser respeitada.
-        var hoje = DateOnly.FromDateTime(DateTime.Today);
+        var hoje = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo")));
         var gradeAbertaEhFutura = atuais.Count > 0 && atuais.All(h => h.DataInicio > hoje);
         return !gradeAbertaEhFutura || atuais.All(h => h.DataInicio == vigenteDesde);
     }

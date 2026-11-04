@@ -81,11 +81,11 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     order by au.atualizado_em desc
                     limit 1
                 ) real on true
-                where (h.ativo = true or d.data < current_date)
-                  and (a.ativo = true or d.data < current_date)
-                  and (p.ativo = true or d.data < current_date)
-                  and (a.status in ('Ativo','Experimental','Inadimplente') or d.data < current_date)
-                  and (p.status = 'Ativa' or d.data < current_date)
+                where (h.ativo = true or d.data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (a.ativo = true or d.data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (p.ativo = true or d.data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (a.status in ('Ativo','Experimental','Inadimplente') or d.data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (p.status = 'Ativa' or d.data < (now() at time zone 'America/Sao_Paulo')::date)
                   and (@professora_id is null or p.id = @professora_id)
                   and h.data_inicio <= d.data
                   and (h.data_fim is null or h.data_fim >= d.data)
@@ -151,7 +151,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                     p.id as professora_id,
                     p.nome as professora_nome,
                     case
-                        when aa.status = 'aplicada' or au.status = 'realizada' then 'Realizada'
+                        when aa.status in ('aplicada','perdida') then 'Realizada'
                         when au.status = 'cancelada' or aa.status = 'cancelada' then 'Cancelada'
                         else 'Agendada'
                     end as status,
@@ -174,7 +174,7 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                 join public.aula_alunos aa on aa.aula_id = au.id
                 join public.alunos a on a.id = aa.aluno_id
                 join public.professoras p on p.id = au.professora_id
-                join public.reposicoes r on r.id = au.reposicao_origem_id
+                join public.reposicoes r on r.aula_reposicao_id = au.id and r.aluno_id = aa.aluno_id
                 where au.eh_reposicao = true
                   and au.status <> 'cancelada'
                   and au.data_aula between @data_inicio and @data_fim

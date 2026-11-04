@@ -66,11 +66,11 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     order by au.atualizado_em desc
                     limit 1
                 ) real on true
-                where (h.ativo = true or @data < current_date)
-                  and (a.ativo = true or @data < current_date)
-                  and (p.ativo = true or @data < current_date)
-                  and (a.status in ('Ativo','Experimental','Inadimplente') or @data < current_date)
-                  and (p.status = 'Ativa' or @data < current_date)
+                where (h.ativo = true or @data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (a.ativo = true or @data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (p.ativo = true or @data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (a.status in ('Ativo','Experimental','Inadimplente') or @data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and (p.status = 'Ativa' or @data < (now() at time zone 'America/Sao_Paulo')::date)
                   and extract(dow from @data::date)::smallint = h.dia_semana
                   and h.data_inicio <= @data
                   and (h.data_fim is null or h.data_fim >= @data)
@@ -115,7 +115,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                   and (@professora_id is null or au.professora_id = @professora_id)
             ), reposicoes_agendadas as (
                 select
-                    ('a:' || au.id::text) as ocorrencia_id,
+                    ('a:' || au.id::text || ':' || a.id::text) as ocorrencia_id,
                     au.id as aula_id,
                     null::uuid as horario_recorrente_id,
                     r.id as reposicao_id,
@@ -144,7 +144,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 join public.aula_alunos aa on aa.aula_id = au.id
                 join public.alunos a on a.id = aa.aluno_id
                 join public.professoras p on p.id = au.professora_id
-                join public.reposicoes r on r.id = au.reposicao_origem_id
+                join public.reposicoes r on r.aula_reposicao_id = au.id and r.aluno_id = aa.aluno_id
                 where au.eh_reposicao = true
                   and au.status <> 'cancelada'
                   and au.data_aula = @data
@@ -221,7 +221,19 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         try
         {
             var occurrence = request.Ocorrencia;
+            // A remarcacao, o cancelamento e os resultados da dupla usam o mesmo
+            // lock da aula original. Resultado de uma aluna nao pode competir
+            // com o reagendamento da outra.
+            if (occurrence.EhReposicao && occurrence.ReposicaoId.HasValue)
+                await BloquearReposicoesDaOrigemAsync(connection, transaction,
+                    occurrence.ReposicaoId.Value, cancellationToken);
             var aulaId = occurrence.AulaId ?? await EnsureRecurringLessonAsync(connection, transaction, occurrence, request.UsuarioAuthId, cancellationToken);
+            await using (var bloqueioAula = new NpgsqlCommand(
+                "select id from public.aulas where id=@aula_id for update", connection, transaction))
+            {
+                bloqueioAula.Parameters.AddWithValue("aula_id", aulaId);
+                _ = await bloqueioAula.ExecuteScalarAsync(cancellationToken);
+            }
             var previousStatus = await GetParticipantStatusAsync(connection, transaction, aulaId, occurrence.AlunoId, cancellationToken) ?? "agendado";
             var databaseStatus = ToDatabaseParticipantStatus(request.Status);
 
@@ -339,7 +351,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             committed = true;
 
             var refreshedId = occurrence.EhReposicao
-                ? $"a:{aulaId}"
+                ? $"a:{aulaId}:{occurrence.AlunoId}"
                 : occurrence.OcorrenciaId;
             var refreshed = await BuscarOcorrenciaAsync(refreshedId, occurrence.ProfessoraId, cancellationToken);
             if (refreshed is null)
@@ -768,14 +780,9 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             join public.alunos al on al.id = r.aluno_id
             join public.professoras po on po.id = origem.professora_id
             left join public.professoras pa on pa.id = r.professora_agendada_id
-            left join lateral (
-                select au.id
-                from public.aulas au
-                where au.reposicao_origem_id = r.id
-                  and au.eh_reposicao = true
-                order by au.atualizado_em desc
-                limit 1
-            ) reposicao_aula on true
+            left join public.aulas reposicao_aula
+              on reposicao_aula.id = r.aula_reposicao_id
+             and reposicao_aula.eh_reposicao = true
             where @professora_id is null
                or origem.professora_id = @professora_id
                or r.professora_agendada_id = @professora_id
@@ -805,6 +812,78 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         return list.FirstOrDefault(item => item.Id == reposicaoId);
     }
 
+    private sealed record ReposicaoParticipante(
+        Guid Id, Guid AlunoId, string Status, Guid? AulaId,
+        DateOnly? Data, TimeOnly? Inicio, TimeOnly? Fim, Guid? ProfessoraId);
+
+    // Sempre serializa todas as operacoes da aula original, independentemente de qual
+    // aluna da dupla foi selecionada. Evita dois agendamentos paralelos do mesmo par.
+    private static async Task BloquearReposicoesDaOrigemAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid reposicaoId,
+        CancellationToken cancellationToken)
+    {
+        // Retornar a chave real (UUID) evita depender de como Npgsql materializa
+        // o retorno void de pg_advisory_xact_lock em ExecuteScalarAsync.
+        const string origemSql = "select aula_origem_id from public.reposicoes where id=@id;";
+        await using var origem = new NpgsqlCommand(origemSql, connection, transaction);
+        origem.Parameters.AddWithValue("id", reposicaoId);
+        if (await origem.ExecuteScalarAsync(cancellationToken) is not Guid aulaOrigemId)
+            throw new RegistroAulaNotFoundException("A reposição não foi encontrada.");
+
+        const string lockSql = "select pg_advisory_xact_lock(hashtextextended(@chave, 0));";
+        await using var bloqueio = new NpgsqlCommand(lockSql, connection, transaction);
+        bloqueio.Parameters.AddWithValue("chave", $"reposicoes_origem:{aulaOrigemId}");
+        await bloqueio.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<ReposicaoParticipante>> BuscarParticipantesDaReposicaoAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid aulaOrigemId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select id, aluno_id, status, aula_reposicao_id,
+                   data_agendada, hora_inicio, hora_fim, professora_agendada_id
+            from public.reposicoes
+            where aula_origem_id = @origem_id and status <> 'concluida'
+            order by id for update;
+            """;
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("origem_id", aulaOrigemId);
+        var result = new List<ReposicaoParticipante>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            result.Add(new ReposicaoParticipante(reader.GetGuid(0), reader.GetGuid(1), reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                reader.IsDBNull(4) ? null : reader.GetFieldValue<DateOnly>(4),
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<TimeOnly>(5),
+                reader.IsDBNull(6) ? null : reader.GetFieldValue<TimeOnly>(6),
+                reader.IsDBNull(7) ? null : reader.GetGuid(7)));
+        return result;
+    }
+
+    // Nunca reagende/apague uma sessao da dupla depois que qualquer aluna teve
+    // resultado lancado. A conciliacao dos registros antigos exige analise humana.
+    private static async Task ValidarAgendamentoAindaAbertoAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid aulaId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            select exists (
+                select 1 from public.aulas au
+                where au.id=@id and (au.status='realizada' or au.status_pagamento IN ('approved','paid')
+                  or au.elegivel_pagamento=true or au.valor_pagamento<>0)
+            ) or exists (
+                select 1 from public.aula_alunos aa
+                where aa.aula_id=@id and aa.status not in ('agendado','cancelada')
+            );
+            """;
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("id", aulaId);
+        if (Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken)))
+            throw new RegistroAulaConflictException(
+                "Uma participante desta reposição já possui resultado ou pagamento. Não é possível alterar o agendamento compartilhado; solicite conciliação administrativa.");
+    }
+
     public async Task<ReposicaoResponse> AgendarReposicaoAsync(
         Guid reposicaoId,
         AgendarReposicaoRequest request,
@@ -817,110 +896,96 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         var committed = false;
         try
         {
+            await BloquearReposicoesDaOrigemAsync(connection, transaction, reposicaoId, cancellationToken);
             var origin = await GetReplacementOriginAsync(connection, transaction, reposicaoId, cancellationToken)
                 ?? throw new RegistroAulaNotFoundException("A reposição não foi encontrada.");
-
             if (origin.Status == "concluida")
                 throw new RegistroAulaConflictException("A reposição já foi concluída.");
-
             if (!await TeacherExistsAsync(connection, transaction, request.ProfessoraId, cancellationToken))
                 throw new RegistroAulaValidationException("A professora escolhida para a reposição não está ativa.");
 
-            // Serialize scheduling decisions for this teacher/student/day. Without the
-            // transaction-scoped locks, two concurrent requests could both pass the
-            // overlap query and then insert conflicting lessons.
-            await AcquireScheduleLocksAsync(
-                connection,
-                transaction,
-                request.ProfessoraId,
-                origin.AlunoId,
-                request.Data,
-                cancellationToken);
+            var participantes = await BuscarParticipantesDaReposicaoAsync(
+                connection, transaction, origin.AulaOrigemId, cancellationToken);
+            if (!participantes.Any(item => item.Id == reposicaoId))
+                throw new RegistroAulaConflictException("Este crédito não está mais disponível.");
 
-            var existingReplacementLessonId = await GetReplacementLessonIdAsync(
-                connection,
-                transaction,
-                reposicaoId,
-                cancellationToken);
-            if (await ExisteConflitoNovaAulaAsync(
-                    connection,
-                    transaction,
-                    request.ProfessoraId,
-                    origin.AlunoId,
-                    request.Data,
-                    request.HoraInicio,
-                    request.HoraFim,
-                    cancellationToken,
-                    existingReplacementLessonId,
-                    origin.AulaOrigemId))
-            {
+            // Todos os creditos ainda abertos da mesma aula original pertencem à
+            // mesma sessao de dupla/grupo. Creditos separados agendados antes da
+            // correcao precisam ser conciliados (nao mover historicos pagos).
+            var aulasExistentes = participantes.Where(p => p.Status == "agendada" && p.AulaId.HasValue)
+                .Select(p => p.AulaId!.Value).Distinct().ToArray();
+            if (aulasExistentes.Length > 1)
                 throw new RegistroAulaConflictException(
-                    $"Já existe uma aula do aluno ou da professora que conflita com " +
-                    $"{request.HoraInicio:HH:mm}–{request.HoraFim:HH:mm} nessa data.");
+                    "Há reposições antigas separadas desta dupla. A administração deve conciliar os agendamentos antes de reagendar.");
+            if (participantes.Any(p => p.Status == "agendada" && p.AulaId.HasValue
+                && p.AulaId == aulasExistentes.FirstOrDefault()
+                && p.Id != reposicaoId && participantes.First(x => x.Id == reposicaoId).AulaId != p.AulaId
+                && (p.Data != request.Data || p.Inicio != request.HoraInicio || p.Fim != request.HoraFim
+                    || p.ProfessoraId != request.ProfessoraId)))
+                throw new RegistroAulaConflictException(
+                    "A dupla já tem uma reposição agendada em outro horário. Reagende pelo crédito já agendado ou cancele primeiro.");
+
+            // Locks transacionais por professora/aluno/dia; a origem ja esta
+            // serializada pelo advisory lock acima.
+            foreach (var alunoId in participantes.Select(p => p.AlunoId).Distinct().OrderBy(id => id))
+                await AcquireScheduleLocksAsync(connection, transaction,
+                    request.ProfessoraId, alunoId, request.Data, cancellationToken);
+
+            var aulaExistenteId = aulasExistentes.FirstOrDefault();
+            if (aulaExistenteId == Guid.Empty)
+                aulaExistenteId = await GetReplacementLessonIdAsync(
+                    connection, transaction, reposicaoId, cancellationToken) ?? Guid.Empty;
+            if (aulaExistenteId != Guid.Empty)
+                await ValidarAgendamentoAindaAbertoAsync(connection, transaction, aulaExistenteId, cancellationToken);
+
+            foreach (var aluno in participantes)
+            {
+                if (await ExisteConflitoNovaAulaAsync(connection, transaction,
+                    request.ProfessoraId, aluno.AlunoId, request.Data, request.HoraInicio,
+                    request.HoraFim, cancellationToken,
+                    aulaExistenteId == Guid.Empty ? null : aulaExistenteId, origin.AulaOrigemId))
+                    throw new RegistroAulaConflictException(
+                        $"Já existe aula de uma participante ou da professora em {request.HoraInicio:HH:mm}–{request.HoraFim:HH:mm} nessa data.");
             }
+
+            // Se a aluna escolhida ainda nao tinha aula, mas a colega ja tinha,
+            // reutiliza a mesma ocorrencia; nunca cria duas aulas para a dupla.
+            var aulaReposicaoId = await EnsureReplacementLessonAsync(
+                connection, transaction,
+                aulaExistenteId != Guid.Empty
+                    ? participantes.FirstOrDefault(p => p.AulaId == aulaExistenteId)?.Id ?? reposicaoId
+                    : reposicaoId,
+                participantes.Select(p => p.AlunoId).Distinct().ToArray(),
+                request.ProfessoraId, request.Data, request.HoraInicio, request.HoraFim,
+                request.Observacao, usuarioAuthId, cancellationToken);
 
             const string updateSql = """
                 update public.reposicoes
-                set status = 'agendada',
-                    data_agendada = @data,
-                    hora_inicio = @inicio,
-                    hora_fim = @fim,
-                    professora_agendada_id = @professora_id,
-                    observacao_agendamento = @observacao,
-                    concluida_em = null,
-                    atualizado_em = now()
+                set status = 'agendada', data_agendada = @data, hora_inicio = @inicio,
+                    hora_fim = @fim, professora_agendada_id = @professora_id,
+                    observacao_agendamento = @observacao, aula_reposicao_id = @aula_id,
+                    concluida_em = null, atualizado_em = now()
                 where id = @id;
                 """;
-            await using (var command = new NpgsqlCommand(updateSql, connection, transaction))
+            foreach (var aluno in participantes)
             {
-                command.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
-                command.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, request.HoraInicio);
-                command.Parameters.AddWithValue("fim", NpgsqlDbType.Time, request.HoraFim);
-                command.Parameters.AddWithValue("professora_id", request.ProfessoraId);
-                command.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = request.Observacao ?? (object)DBNull.Value });
-                command.Parameters.AddWithValue("id", reposicaoId);
-                await command.ExecuteNonQueryAsync(cancellationToken);
+                await using (var command = new NpgsqlCommand(updateSql, connection, transaction))
+                {
+                    command.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
+                    command.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, request.HoraInicio);
+                    command.Parameters.AddWithValue("fim", NpgsqlDbType.Time, request.HoraFim);
+                    command.Parameters.AddWithValue("professora_id", request.ProfessoraId);
+                    command.Parameters.AddWithValue("aula_id", aulaReposicaoId);
+                    command.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = request.Observacao ?? (object)DBNull.Value });
+                    command.Parameters.AddWithValue("id", aluno.Id);
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+                var acao = aluno.Status == "agendada" ? "reposicao_reagendada" : "reposicao_agendada";
+                await InsertHistoryAsync(connection, transaction, aulaReposicaoId, aluno.AlunoId,
+                    acao, aluno.Status, "agendada", request.Observacao, usuarioAuthId, usuarioNome, cancellationToken);
+                await InsertHistoryAsync(connection, transaction, origin.AulaOrigemId, aluno.AlunoId,
+                    acao, aluno.Status, "agendada", request.Observacao, usuarioAuthId, usuarioNome, cancellationToken);
             }
-
-            var aulaReposicaoId = await EnsureReplacementLessonAsync(
-                connection,
-                transaction,
-                reposicaoId,
-                origin.AlunoId,
-                request.ProfessoraId,
-                request.Data,
-                request.HoraInicio,
-                request.HoraFim,
-                request.Observacao,
-                usuarioAuthId,
-                cancellationToken);
-
-            var scheduleHistoryAction = origin.Status == "agendada" ? "reposicao_reagendada" : "reposicao_agendada";
-            await InsertHistoryAsync(
-                connection,
-                transaction,
-                aulaReposicaoId,
-                origin.AlunoId,
-                scheduleHistoryAction,
-                origin.Status,
-                "agendada",
-                request.Observacao,
-                usuarioAuthId,
-                usuarioNome,
-                cancellationToken);
-            await InsertHistoryAsync(
-                connection,
-                transaction,
-                origin.AulaOrigemId,
-                origin.AlunoId,
-                scheduleHistoryAction,
-                origin.Status,
-                "agendada",
-                request.Observacao,
-                usuarioAuthId,
-                usuarioNome,
-                cancellationToken);
-
             await transaction.CommitAsync(cancellationToken);
             committed = true;
             return await BuscarReposicaoAsync(reposicaoId, null, cancellationToken)
@@ -944,70 +1009,57 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         var committed = false;
         try
         {
+            await BloquearReposicoesDaOrigemAsync(connection, transaction, reposicaoId, cancellationToken);
             var origin = await GetReplacementOriginAsync(connection, transaction, reposicaoId, cancellationToken)
                 ?? throw new RegistroAulaNotFoundException("A reposição não foi encontrada.");
             if (origin.Status == "concluida")
                 throw new RegistroAulaConflictException("Uma reposição concluída não pode ser cancelada.");
 
-            var aulaReposicaoId = await GetReplacementLessonIdAsync(connection, transaction, reposicaoId, cancellationToken);
-            if (aulaReposicaoId.HasValue)
-            {
-                const string cancelLessonSql = """
-                    update public.aulas
-                    set status = 'cancelada', elegivel_pagamento = false, valor_pagamento = 0, atualizado_em = now()
-                    where id = @id and status <> 'realizada';
-                    update public.aula_alunos
-                    set status = 'cancelada', atualizado_em = now()
-                    where aula_id = @id and status <> 'aplicada';
-                    """;
-                await using var cancelCommand = new NpgsqlCommand(cancelLessonSql, connection, transaction);
-                cancelCommand.Parameters.AddWithValue("id", aulaReposicaoId.Value);
-                await cancelCommand.ExecuteNonQueryAsync(cancellationToken);
+            var membros = await BuscarParticipantesDaReposicaoAsync(
+                connection, transaction, origin.AulaOrigemId, cancellationToken);
+            var escolhido = membros.FirstOrDefault(p => p.Id == reposicaoId)
+                ?? throw new RegistroAulaConflictException("Crédito não disponível.");
+            if (escolhido.Status != "agendada" || !escolhido.AulaId.HasValue)
+                throw new RegistroAulaConflictException("Este crédito não possui agendamento ativo.");
+            var relacionados = membros.Where(p => p.AulaId == escolhido.AulaId && p.Status == "agendada").ToArray();
+            await ValidarAgendamentoAindaAbertoAsync(connection, transaction, escolhido.AulaId.Value, cancellationToken);
 
-                await InsertHistoryAsync(
-                    connection,
-                    transaction,
-                    aulaReposicaoId.Value,
-                    origin.AlunoId,
-                    "reposicao_agendamento_cancelado",
-                    "agendada",
-                    "pendente",
-                    null,
-                    usuarioAuthId,
-                    usuarioNome,
-                    cancellationToken);
-                await InsertHistoryAsync(
-                    connection,
-                    transaction,
-                    origin.AulaOrigemId,
-                    origin.AlunoId,
-                    "reposicao_agendamento_cancelado",
-                    "agendada",
-                    "pendente",
-                    null,
-                    usuarioAuthId,
-                    usuarioNome,
-                    cancellationToken);
-            }
-
-            const string updateRepoSql = """
-                update public.reposicoes
-                set status = 'pendente',
-                    data_agendada = null,
-                    hora_inicio = null,
-                    hora_fim = null,
-                    professora_agendada_id = null,
-                    observacao_agendamento = null,
-                    concluida_em = null,
-                    atualizado_em = now()
-                where id = @id;
+            const string cancelarAulaSql = """
+                update public.aulas
+                set status='cancelada', elegivel_pagamento=false, valor_pagamento=0,
+                    status_pagamento='pending', atualizado_em=now()
+                where id=@id;
+                update public.aula_alunos
+                set status='cancelada', atualizado_em=now()
+                where aula_id=@id;
                 """;
-            await using (var command = new NpgsqlCommand(updateRepoSql, connection, transaction))
+            await using (var command = new NpgsqlCommand(cancelarAulaSql, connection, transaction))
             {
-                command.Parameters.AddWithValue("id", reposicaoId);
+                command.Parameters.AddWithValue("id", escolhido.AulaId.Value);
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
-
+            const string atualizarRepoSql = """
+                update public.reposicoes
+                set status='pendente', data_agendada=null, hora_inicio=null,
+                    hora_fim=null, professora_agendada_id=null,
+                    observacao_agendamento=null, aula_reposicao_id=null,
+                    concluida_em=null, atualizado_em=now()
+                where id=@id;
+                """;
+            foreach (var membro in relacionados)
+            {
+                await using (var command = new NpgsqlCommand(atualizarRepoSql, connection, transaction))
+                {
+                    command.Parameters.AddWithValue("id", membro.Id);
+                    await command.ExecuteNonQueryAsync(cancellationToken);
+                }
+                await InsertHistoryAsync(connection, transaction, escolhido.AulaId.Value,
+                    membro.AlunoId, "reposicao_agendamento_cancelado", "agendada", "pendente",
+                    null, usuarioAuthId, usuarioNome, cancellationToken);
+                await InsertHistoryAsync(connection, transaction, origin.AulaOrigemId,
+                    membro.AlunoId, "reposicao_agendamento_cancelado", "agendada", "pendente",
+                    null, usuarioAuthId, usuarioNome, cancellationToken);
+            }
             await transaction.CommitAsync(cancellationToken);
             committed = true;
             return await BuscarReposicaoAsync(reposicaoId, null, cancellationToken)
@@ -1143,32 +1195,6 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                       and (au.professora_id = @professora_id or aa.aluno_id = @aluno_id)
                       and au.hora_inicio < @fim
                       and au.hora_fim > @inicio
-                      -- Duas participantes da mesma aula original podem repor juntas.
-                      -- Somente o MESMO intervalo e a MESMA professora são aceitos;
-                      -- outras aulas, horários parciais e reposições de outros grupos
-                      -- continuam sendo conflitos.
-                      and not (
-                          @aula_origem_dupla_id is not null
-                          and au.eh_reposicao = true
-                          and au.status = 'agendada'
-                          and au.professora_id = @professora_id
-                          and au.hora_inicio = @inicio
-                          and au.hora_fim = @fim
-                          and exists (
-                              select 1
-                              from public.reposicoes outra
-                              join public.aulas origem on origem.id = outra.aula_origem_id
-                              where outra.id = au.reposicao_origem_id
-                                and outra.aula_origem_id = @aula_origem_dupla_id
-                                and outra.aluno_id <> @aluno_id
-                                and outra.status = 'agendada'
-                                and (
-                                    select count(*)
-                                    from public.aula_alunos participante_origem
-                                    where participante_origem.aula_id = origem.id
-                                ) = 2
-                          )
-                      )
                 );
             """;
 
@@ -1608,16 +1634,36 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         if (status == "concluida")
             throw new RegistroAulaConflictException("A aula possui uma reposição já concluída. Para preservar o histórico financeiro, o resultado original não pode ser alterado.");
 
+        // Não excluir a ocorrência compartilhada ou apagar histórico de auditoria.
         const string deleteSql = """
-            delete from public.aulas
-            where reposicao_origem_id = @reposicao_id
-              and eh_reposicao = true
-              and status <> 'realizada';
-            delete from public.reposicoes where id = @reposicao_id;
+            update public.aulas
+            set status='cancelada', elegivel_pagamento=false,
+                valor_pagamento=0, status_pagamento='pending'
+            where id=(select aula_reposicao_id from public.reposicoes where id=@reposicao_id)
+              and status not in ('realizada')
+              and not exists (
+                  select 1 from public.reposicoes outra
+                  join public.reposicoes atual on atual.id=@reposicao_id
+                  where outra.aula_reposicao_id=atual.aula_reposicao_id
+                    and outra.id<>atual.id
+              );
+            delete from public.reposicoes where id = @reposicao_id
+              and not exists (
+                  select 1 from public.reposicoes outra
+                  join public.reposicoes atual on atual.id=@reposicao_id
+                  where outra.aula_reposicao_id=atual.aula_reposicao_id
+                    and outra.id<>atual.id
+              );
             """;
         await using var delete = new NpgsqlCommand(deleteSql, connection, transaction);
         delete.Parameters.AddWithValue("reposicao_id", id.Value);
         await delete.ExecuteNonQueryAsync(cancellationToken);
+        const string verifySql = "select exists(select 1 from public.reposicoes where id=@id);";
+        await using var verify = new NpgsqlCommand(verifySql, connection, transaction);
+        verify.Parameters.AddWithValue("id", id.Value);
+        if (Convert.ToBoolean(await verify.ExecuteScalarAsync(cancellationToken)))
+            throw new RegistroAulaConflictException(
+                "Este crédito está vinculado a uma reposição em dupla. Cancele o agendamento da dupla antes de alterar o resultado original.");
     }
 
     private static async Task RecalculateLessonAsync(
@@ -1653,7 +1699,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 participants.Add((reader.GetGuid(0), reader.GetString(1)));
         }
 
-        type = replacement ? "individual" : GetLessonTypeCode(participants.Select(item => item.AlunoId).Distinct().Count());
+        type = GetLessonTypeCode(participants.Select(item => item.AlunoId).Distinct().Count());
         var statuses = participants.Select(item => item.Status).ToList();
         var policy = await GetPaymentPolicyAsync(connection, transaction, date, cancellationToken);
         var eligibleParticipantIds = participants
@@ -1951,8 +1997,8 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 where h.aluno_id = @aluno_id
                   and h.professora_id = @professora_id
                   and h.ativo = true
-                  and h.data_inicio <= current_date
-                  and (h.data_fim is null or h.data_fim >= current_date)
+                  and h.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                  and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
             ) or exists (
                 select 1
                 from public.alunos a
@@ -1964,8 +2010,8 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                       from public.horarios_recorrentes_alunos h
                       where h.aluno_id = a.id
                         and h.ativo = true
-                        and h.data_inicio <= current_date
-                        and (h.data_fim is null or h.data_fim >= current_date)
+                        and h.data_inicio <= (now() at time zone 'America/Sao_Paulo')::date
+                        and (h.data_fim is null or h.data_fim >= (now() at time zone 'America/Sao_Paulo')::date)
                   )
             );
             """;
@@ -2003,7 +2049,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         Guid reposicaoId,
-        Guid alunoId,
+        IReadOnlyCollection<Guid> alunos,
         Guid professoraId,
         DateOnly date,
         TimeOnly start,
@@ -2012,6 +2058,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         Guid usuarioAuthId,
         CancellationToken cancellationToken)
     {
+        var tipoAula = GetLessonTypeCode(alunos.Count);
         var existingId = await GetReplacementLessonIdAsync(connection, transaction, reposicaoId, cancellationToken);
         Guid aulaId;
         if (existingId.HasValue)
@@ -2023,7 +2070,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     data_aula = @data,
                     hora_inicio = @inicio,
                     hora_fim = @fim,
-                    tipo_aula = 'individual',
+                    tipo_aula = @tipo_aula,
                     status = 'agendada',
                     observacoes = @observacao,
                     elegivel_pagamento = false,
@@ -2035,6 +2082,7 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 """;
             await using var update = new NpgsqlCommand(updateSql, connection, transaction);
             update.Parameters.AddWithValue("professora_id", professoraId);
+            update.Parameters.AddWithValue("tipo_aula", tipoAula);
             update.Parameters.AddWithValue("data", NpgsqlDbType.Date, date);
             update.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, start);
             update.Parameters.AddWithValue("fim", NpgsqlDbType.Time, end);
@@ -2050,13 +2098,14 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     observacoes, eh_reposicao, reposicao_origem_id, elegivel_pagamento,
                     valor_aula_aplicado, valor_pagamento, status_pagamento, criado_por)
                 values (
-                    @professora_id, 'individual', @data, @inicio, @fim, 'agendada',
+                    @professora_id, @tipo_aula, @data, @inicio, @fim, 'agendada',
                     @observacao, true, @reposicao_id, false,
                     0, 0, 'pending', @criado_por)
                 returning id;
                 """;
             await using var insert = new NpgsqlCommand(insertSql, connection, transaction);
             insert.Parameters.AddWithValue("professora_id", professoraId);
+            insert.Parameters.AddWithValue("tipo_aula", tipoAula);
             insert.Parameters.AddWithValue("data", NpgsqlDbType.Date, date);
             insert.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, start);
             insert.Parameters.AddWithValue("fim", NpgsqlDbType.Time, end);
@@ -2067,17 +2116,34 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 ?? throw new InvalidOperationException("Não foi possível criar a aula de reposição."));
         }
 
+        // Ao reativar uma aula cancelada, nao manter participantes obsoletas
+        // como se ainda fizessem parte da nova reposicao (historia fica em historico_aulas).
+        const string limparCanceladosSql = """
+            delete from public.aula_alunos
+            where aula_id=@aula_id and status='cancelada'
+              and not (aluno_id = any(@alunos));
+            """;
+        await using (var limpeza = new NpgsqlCommand(limparCanceladosSql, connection, transaction))
+        {
+            limpeza.Parameters.AddWithValue("aula_id", aulaId);
+            limpeza.Parameters.AddWithValue("alunos", alunos.ToArray());
+            await limpeza.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         const string participantSql = """
             insert into public.aula_alunos (aula_id, aluno_id, status, observacoes)
             values (@aula_id, @aluno_id, 'agendado', @observacao)
             on conflict (aula_id, aluno_id) do update
             set status = 'agendado', observacoes = excluded.observacoes, atualizado_em = now();
             """;
-        await using var participant = new NpgsqlCommand(participantSql, connection, transaction);
-        participant.Parameters.AddWithValue("aula_id", aulaId);
-        participant.Parameters.AddWithValue("aluno_id", alunoId);
-        participant.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = observation ?? (object)DBNull.Value });
-        await participant.ExecuteNonQueryAsync(cancellationToken);
+        foreach (var alunoId in alunos)
+        {
+            await using var participant = new NpgsqlCommand(participantSql, connection, transaction);
+            participant.Parameters.AddWithValue("aula_id", aulaId);
+            participant.Parameters.AddWithValue("aluno_id", alunoId);
+            participant.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = observation ?? (object)DBNull.Value });
+            await participant.ExecuteNonQueryAsync(cancellationToken);
+        }
         return aulaId;
     }
 
@@ -2088,11 +2154,15 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         CancellationToken cancellationToken)
     {
         const string sql = """
-            select id
-            from public.aulas
-            where reposicao_origem_id = @id and eh_reposicao = true
-            order by atualizado_em desc
-            limit 1;
+            select coalesce(r.aula_reposicao_id, (
+                select au.id from public.aulas au
+                join public.reposicoes dona on dona.id = au.reposicao_origem_id
+                where dona.aula_origem_id = r.aula_origem_id
+                  and au.eh_reposicao = true and au.status = 'cancelada'
+                order by au.atualizado_em desc, au.id
+                limit 1
+            ))
+            from public.reposicoes r where r.id = @id;
             """;
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("id", reposicaoId);

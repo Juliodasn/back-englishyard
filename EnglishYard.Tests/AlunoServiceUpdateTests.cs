@@ -251,16 +251,58 @@ public sealed class AlunoServiceUpdateTests
     }
 
     [Fact]
-    public async Task Horarios_ExigeInicioFuturo()
+    public async Task Horarios_ImpedeInicioNoPassado()
     {
         var alunoId = Guid.NewGuid();
         var professoraId = Guid.NewGuid();
         var repo = new AlunoRepositoryFake(alunoId, professoraId);
         var service = new AlunoService(repo, new StorageNotUsedFake());
         await Assert.ThrowsAsync<AlunoValidationException>(() => service.AlterarSomenteHorariosAsync(
-            alunoId, professoraId, new AlterarGradeHorariosRequest(DateOnly.FromDateTime(DateTime.Today),
+            alunoId, professoraId, new AlterarGradeHorariosRequest(HojeNaEscola().AddDays(-1),
             [new AlterarHorarioItemRequest(1, new(8, 0), new(9, 0), professoraId)]), CancellationToken.None));
     }
+
+    [Fact]
+    public async Task Horarios_PermiteAlterarGradeComVigenciaHoje()
+    {
+        var alunoId = Guid.NewGuid();
+        var professoraId = Guid.NewGuid();
+        var hoje = HojeNaEscola();
+        var repo = new AlunoRepositoryFake(alunoId, professoraId)
+        {
+            Horarios = [new HorarioRecorrenteAlunoResponse(Guid.NewGuid(), 1,
+                new(8, 0), new(9, 0), professoraId, "Tati", hoje.AddDays(-7), null, true)]
+        };
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        await service.AlterarSomenteHorariosAsync(alunoId, professoraId,
+            new AlterarGradeHorariosRequest(hoje,
+                [new AlterarHorarioItemRequest(3, new(8, 0), new(9, 0), professoraId)]),
+            CancellationToken.None);
+        Assert.NotNull(repo.NovaGrade);
+        Assert.Single(repo.NovaGrade!);
+        Assert.Equal(hoje, repo.NovaGrade!.Single().DataInicio);
+    }
+
+    [Fact]
+    public async Task AtualizarAsync_AceitaDataDeHojeParaGradeCompleta()
+    {
+        var alunoId = Guid.NewGuid();
+        var professoraId = Guid.NewGuid();
+        var repo = new AlunoRepositoryFake(alunoId, professoraId);
+        var service = new AlunoService(repo, new StorageNotUsedFake());
+        var hoje = HojeNaEscola();
+        await service.AtualizarAsync(alunoId, CriarRequestBase() with
+        {
+            AgendaVigenteDesde = hoje,
+            HorariosRecorrentes = [new HorarioRecorrenteAlunoRequest(3,
+                new(8, 0), new(9, 0), professoraId, hoje)]
+        }, CancellationToken.None);
+        Assert.Equal(hoje, Assert.Single(repo.AtualizacaoPersistida!.HorariosRecorrentes!).DataInicio);
+    }
+
+    private static DateOnly HojeNaEscola() => DateOnly.FromDateTime(
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo")));
 
     private static AtualizarAlunoRequest CriarRequestBase() => new(
         Nome: "Student Updated",
