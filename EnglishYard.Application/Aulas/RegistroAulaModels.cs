@@ -80,6 +80,25 @@ public sealed record AtualizarOcorrenciaAulaRequest(
     TimeOnly HoraFim,
     string? Observacao);
 
+// A mesma sessão é movida sem gerar falta ou crédito de reposição.
+public sealed record RemarcarAulaNormalRequest(
+    string OcorrenciaId,
+    DateOnly Data,
+    TimeOnly HoraInicio,
+    TimeOnly HoraFim,
+    Guid ProfessoraId,
+    string? Observacao);
+
+public sealed record RemarcarAulaNormalPersistenciaRequest(
+    OcorrenciaAulaData Ocorrencia,
+    DateOnly Data,
+    TimeOnly HoraInicio,
+    TimeOnly HoraFim,
+    Guid ProfessoraId,
+    string? Observacao,
+    Guid UsuarioAuthId,
+    string UsuarioNome);
+
 public sealed record CancelarOcorrenciaAulaRequest(
     string OcorrenciaId,
     string? Motivo);

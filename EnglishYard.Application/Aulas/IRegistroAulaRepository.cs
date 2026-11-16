@@ -20,6 +20,10 @@ public interface IRegistroAulaRepository
         AtualizarOcorrenciaPersistenciaRequest request,
         CancellationToken cancellationToken);
 
+    Task<OcorrenciaAulaData> RemarcarAulaNormalAsync(
+        RemarcarAulaNormalPersistenciaRequest request,
+        CancellationToken cancellationToken);
+
     Task<OcorrenciaAulaData> CancelarOcorrenciaAsync(
         CancelarOcorrenciaPersistenciaRequest request,
         CancellationToken cancellationToken);

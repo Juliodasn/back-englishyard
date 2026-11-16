@@ -71,6 +71,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                   and (p.ativo = true or @data < (now() at time zone 'America/Sao_Paulo')::date)
                   and (a.status in ('Ativo','Experimental','Inadimplente') or @data < (now() at time zone 'America/Sao_Paulo')::date)
                   and (p.status = 'Ativa' or @data < (now() at time zone 'America/Sao_Paulo')::date)
+                  and not exists (
+                      select 1 from public.aulas_excecoes_grade eg
+                      where eg.horario_recorrente_aluno_id = h.id and eg.data_original = @data
+                  )
                   and extract(dow from @data::date)::smallint = h.dia_semana
                   and h.data_inicio <= @data
                   and (h.data_fim is null or h.data_fim >= @data)
@@ -491,6 +495,298 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
         }
     }
 
+    // Move a sessão normal, não a grade semanal: a tabela de exceções suprime
+    // cada ocorrência original e o registro em aulas continua único, mesmo
+    // quando há dois ou mais participantes ou troca da professora.
+    public async Task<OcorrenciaAulaData> RemarcarAulaNormalAsync(
+        RemarcarAulaNormalPersistenciaRequest request,
+        CancellationToken cancellationToken)
+    {
+        var occurrence = request.Ocorrencia;
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, cancellationToken);
+        var committed = false;
+        try
+        {
+            if (!await TeacherExistsAsync(connection, transaction, request.ProfessoraId, cancellationToken))
+                throw new RegistroAulaNotFoundException("A professora substituta está inativa ou não foi encontrada.");
+
+            // Uma ocorrência da grade (r:horario:data) representa a sessão toda,
+            // inclusive os alunos de dupla/grupo com o mesmo horário.
+            var isRecurring = TryParseRecurringOccurrence(occurrence.OcorrenciaId, out var sourceScheduleId, out var sourceDate);
+            var schedules = new List<(Guid HorarioId, Guid AlunoId)>();
+            if (isRecurring)
+            {
+                const string scheduleSql = """
+                    select h.id, h.aluno_id
+                    from public.horarios_recorrentes_alunos h
+                    join public.horarios_recorrentes_alunos origem on origem.id = @origem_id
+                    where h.professora_id = origem.professora_id
+                      and h.dia_semana = origem.dia_semana
+                      and h.hora_inicio = origem.hora_inicio
+                      and h.hora_fim = origem.hora_fim
+                      and h.data_inicio <= @data_origem
+                      and (h.data_fim is null or h.data_fim >= @data_origem)
+                      and (h.ativo = true or @data_origem < (now() at time zone 'America/Sao_Paulo')::date)
+                    order by h.aluno_id;
+                    """;
+                await using var query = new NpgsqlCommand(scheduleSql, connection, transaction);
+                query.Parameters.AddWithValue("origem_id", sourceScheduleId);
+                query.Parameters.AddWithValue("data_origem", NpgsqlDbType.Date, sourceDate);
+                await using var reader = await query.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    schedules.Add((reader.GetGuid(0), reader.GetGuid(1)));
+            }
+            else if (!TryParseLessonOccurrence(occurrence.OcorrenciaId, out _, out _))
+                throw new RegistroAulaValidationException("Identificador de ocorrência inválido.");
+
+            if (isRecurring && (!schedules.Any() || !schedules.Any(s => s.HorarioId == sourceScheduleId)))
+                throw new RegistroAulaConflictException("Não foi possível recuperar a grade original desta aula.");
+            if (isRecurring && schedules.Select(x => x.AlunoId).Distinct().Count() != schedules.Count)
+                throw new RegistroAulaConflictException("Há horários recorrentes sobrepostos para o mesmo aluno. Ajuste a grade antes de remarcar.");
+
+            var aulaId = occurrence.AulaId;
+            var participants = new List<(Guid AlunoId, string Status)>();
+            Guid actualTeacher = occurrence.ProfessoraId;
+            DateOnly actualDate = occurrence.Data;
+            if (aulaId.HasValue)
+            {
+                const string lockLessonSql = """
+                    select professora_id, data_aula, status, status_pagamento, eh_reposicao
+                    from public.aulas where id = @id for update;
+                    """;
+                await using (var command = new NpgsqlCommand(lockLessonSql, connection, transaction))
+                {
+                    command.Parameters.AddWithValue("id", aulaId.Value);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken))
+                        throw new RegistroAulaNotFoundException("A aula original não existe mais.");
+                    actualTeacher = reader.GetGuid(0);
+                    actualDate = reader.GetFieldValue<DateOnly>(1);
+                    if (reader.GetString(2) != "agendada" || reader.GetString(3) != "pending" || reader.GetBoolean(4))
+                        throw new RegistroAulaConflictException("Aula com resultado, reposição ou pagamento processado não pode ser remarcada.");
+                }
+                const string participantSql = "select aluno_id, status from public.aula_alunos where aula_id = @id for update;";
+                await using var command = new NpgsqlCommand(participantSql, connection, transaction);
+                command.Parameters.AddWithValue("id", aulaId.Value);
+                await using var reader2 = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader2.ReadAsync(cancellationToken))
+                    participants.Add((reader2.GetGuid(0), reader2.GetString(1)));
+                if (participants.Count == 0 || participants.Any(x => x.Status != "agendado"))
+                    throw new RegistroAulaConflictException("Uma das presenças da turma já foi lançada. Não é possível remarcar.");
+                if (participants.Select(x => x.AlunoId).Distinct().Count() != participants.Count)
+                    throw new RegistroAulaConflictException("Existem participantes repetidos na aula. Solicite revisão administrativa.");
+                if (actualTeacher != occurrence.ProfessoraId || actualDate != occurrence.Data)
+                    throw new RegistroAulaConflictException("Esta aula mudou desde que foi aberta. Recarregue o calendário.");
+            }
+
+            if (isRecurring)
+            {
+                // Nunca fundir uma dupla se uma aluna já tiver outra aula real
+                // associada àquela ocorrência de origem (ambiguidade histórica).
+                const string alreadyRecordedSql = """
+                    select exists (
+                        select 1 from public.aula_alunos aa
+                        join public.aulas au on au.id = aa.aula_id
+                        where aa.horario_recorrente_aluno_id = @horario_id
+                          and au.data_aula = @data
+                          and au.id <> coalesce(@aula_id, '00000000-0000-0000-0000-000000000000'::uuid)
+                    );
+                    """;
+                foreach (var scheduled in schedules)
+                {
+                    await using var query = new NpgsqlCommand(alreadyRecordedSql, connection, transaction);
+                    query.Parameters.AddWithValue("horario_id", scheduled.HorarioId);
+                    query.Parameters.AddWithValue("data", NpgsqlDbType.Date, sourceDate);
+                    query.Parameters.Add(new NpgsqlParameter("aula_id", NpgsqlDbType.Uuid)
+                    {
+                        Value = aulaId.HasValue ? aulaId.Value : DBNull.Value
+                    });
+                    if (Convert.ToBoolean(await query.ExecuteScalarAsync(cancellationToken)))
+                        throw new RegistroAulaConflictException("Há registros separados nesta turma. Revise as aulas existentes antes de remarcá-la.");
+                }
+
+                if (participants.Any(p => !schedules.Any(s => s.AlunoId == p.AlunoId)))
+                    throw new RegistroAulaConflictException("A turma possui participantes que não pertencem a este horário. Revise a aula antes de remarcar.");
+                foreach (var s in schedules)
+                    if (!participants.Any(p => p.AlunoId == s.AlunoId))
+                        participants.Add((s.AlunoId, "agendado"));
+            }
+            if (participants.Count == 0)
+                throw new RegistroAulaNotFoundException("Nenhum aluno foi encontrado nesta aula.");
+
+            // Os pagamentos fechados são snapshots: não mover entre competências
+            // aprovadas/pagas, nem trocar quem recebe após o fechamento.
+            const string closedSql = """
+                select exists (
+                    select 1 from public.fechamentos_professoras f
+                    where f.professora_id in (@professora_origem, @professora_destino)
+                      and f.status in ('Aprovado','Pago')
+                      and f.competencia in (
+                          date_trunc('month', @data_antiga::date)::date,
+                          date_trunc('month', @data_nova::date)::date)
+                );
+                """;
+            await using (var check = new NpgsqlCommand(closedSql, connection, transaction))
+            {
+                check.Parameters.AddWithValue("professora_origem", actualTeacher);
+                check.Parameters.AddWithValue("professora_destino", request.ProfessoraId);
+                check.Parameters.AddWithValue("data_antiga", NpgsqlDbType.Date, actualDate);
+                check.Parameters.AddWithValue("data_nova", NpgsqlDbType.Date, request.Data);
+                if (Convert.ToBoolean(await check.ExecuteScalarAsync(cancellationToken)))
+                    throw new RegistroAulaConflictException("Há fechamento aprovado/pago para uma das professoras nesse período. Solicite ajuste administrativo.");
+            }
+
+            // Trava apenas os professores/dias e alunos/dias envolvidos.
+            var scheduleKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var date in new[] { actualDate, request.Data })
+            {
+                foreach (var teacher in new[] { actualTeacher, request.ProfessoraId })
+                    scheduleKeys.Add($"schedule:teacher:{teacher:N}:{date:yyyyMMdd}");
+                foreach (var participant in participants)
+                    scheduleKeys.Add($"schedule:student:{participant.AlunoId:N}:{date:yyyyMMdd}");
+            }
+            foreach (var key in scheduleKeys.Order(StringComparer.Ordinal))
+            {
+                await using var command = new NpgsqlCommand("select pg_advisory_xact_lock(hashtextextended(@key, 0));", connection, transaction);
+                command.Parameters.AddWithValue("key", key);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (!aulaId.HasValue)
+            {
+                const string createSql = """
+                    insert into public.aulas (
+                        professora_id, tipo_aula, titulo, data_aula, hora_inicio, hora_fim,
+                        status, observacoes, eh_reposicao, elegivel_pagamento,
+                        valor_aula_aplicado, valor_pagamento, status_pagamento, criado_por)
+                    values (@professora, @tipo, 'Aula normal remarcada', @data, @inicio, @fim,
+                        'agendada', @observacao, false, false, 0, 0, 'pending', @usuario)
+                    returning id;
+                    """;
+                await using var create = new NpgsqlCommand(createSql, connection, transaction);
+                create.Parameters.AddWithValue("professora", request.ProfessoraId);
+                create.Parameters.AddWithValue("tipo", GetLessonTypeCode(participants.Count));
+                create.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
+                create.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, request.HoraInicio);
+                create.Parameters.AddWithValue("fim", NpgsqlDbType.Time, request.HoraFim);
+                create.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = request.Observacao ?? (object)DBNull.Value });
+                create.Parameters.AddWithValue("usuario", request.UsuarioAuthId);
+                aulaId = (Guid)(await create.ExecuteScalarAsync(cancellationToken)
+                    ?? throw new InvalidOperationException("Falha ao criar a ocorrência remarcada."));
+            }
+            else
+            {
+                const string moveSql = """
+                    update public.aulas
+                    set professora_id = @professora, data_aula = @data,
+                        hora_inicio = @inicio, hora_fim = @fim,
+                        tipo_aula = @tipo,
+                        observacoes = coalesce(@observacao, observacoes), atualizado_em = now()
+                    where id = @id;
+                    """;
+                await using var command = new NpgsqlCommand(moveSql, connection, transaction);
+                command.Parameters.AddWithValue("id", aulaId.Value);
+                command.Parameters.AddWithValue("professora", request.ProfessoraId);
+                command.Parameters.AddWithValue("tipo", GetLessonTypeCode(participants.Count));
+                command.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
+                command.Parameters.AddWithValue("inicio", NpgsqlDbType.Time, request.HoraInicio);
+                command.Parameters.AddWithValue("fim", NpgsqlDbType.Time, request.HoraFim);
+                command.Parameters.Add(new NpgsqlParameter("observacao", NpgsqlDbType.Text) { Value = request.Observacao ?? (object)DBNull.Value });
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Quando há real previamente originado da grade, torná-lo visível
+            // na nova data pela fonte de aulas pontuais. UUID da aula permanece.
+            const string detachSql = """
+                update public.aula_alunos
+                set horario_recorrente_aluno_id = null, atualizado_em = now()
+                where aula_id = @aula_id;
+                """;
+            await using (var detach = new NpgsqlCommand(detachSql, connection, transaction))
+            {
+                detach.Parameters.AddWithValue("aula_id", aulaId.Value);
+                await detach.ExecuteNonQueryAsync(cancellationToken);
+            }
+            const string addStudentSql = """
+                insert into public.aula_alunos (aula_id, aluno_id, status, horario_recorrente_aluno_id)
+                values (@aula_id, @aluno_id, 'agendado', null)
+                on conflict (aula_id, aluno_id) do nothing;
+                """;
+            foreach (var participant in participants)
+            {
+                await using var add = new NpgsqlCommand(addStudentSql, connection, transaction);
+                add.Parameters.AddWithValue("aula_id", aulaId.Value);
+                add.Parameters.AddWithValue("aluno_id", participant.AlunoId);
+                await add.ExecuteNonQueryAsync(cancellationToken);
+            }
+            if (isRecurring)
+            {
+                const string exceptionSql = """
+                    insert into public.aulas_excecoes_grade (
+                        horario_recorrente_aluno_id, data_original, aula_id, criado_por)
+                    values (@horario_id, @data_origem, @aula_id, @usuario)
+                    on conflict (horario_recorrente_aluno_id, data_original) do update
+                    set aula_id = excluded.aula_id
+                    where public.aulas_excecoes_grade.aula_id = excluded.aula_id;
+                    """;
+                foreach (var scheduled in schedules)
+                {
+                    await using var command = new NpgsqlCommand(exceptionSql, connection, transaction);
+                    command.Parameters.AddWithValue("horario_id", scheduled.HorarioId);
+                    command.Parameters.AddWithValue("data_origem", NpgsqlDbType.Date, sourceDate);
+                    command.Parameters.AddWithValue("aula_id", aulaId.Value);
+                    command.Parameters.AddWithValue("usuario", request.UsuarioAuthId);
+                    if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+                        throw new RegistroAulaConflictException("Esta aula já foi remarcada em outra operação. Recarregue o calendário.");
+                }
+            }
+
+            foreach (var participant in participants)
+            {
+                if (await ExisteConflitoNovaAulaAsync(
+                    connection, transaction, request.ProfessoraId, participant.AlunoId,
+                    request.Data, request.HoraInicio, request.HoraFim,
+                    cancellationToken, ignorarAulaId: aulaId.Value))
+                {
+                    throw new RegistroAulaConflictException(
+                        "Há conflito de horário da professora ou de um participante na nova data. Selecione outro horário.");
+                }
+            }
+
+            // Sessão única, independentemente da quantidade de alunos.
+            var history = $"Aula normal remarcada de {actualDate:dd/MM/yyyy} " +
+                          $"{occurrence.HoraInicio:HH:mm}-{occurrence.HoraFim:HH:mm} " +
+                          $"(professora {actualTeacher}) para {request.Data:dd/MM/yyyy} " +
+                          $"{request.HoraInicio:HH:mm}-{request.HoraFim:HH:mm} " +
+                          $"(professora {request.ProfessoraId}). " +
+                          "Aula preservada sem crédito de reposição.";
+            if (!string.IsNullOrWhiteSpace(request.Observacao)) history += $" {request.Observacao}";
+            foreach (var participant in participants)
+                await InsertHistoryAsync(
+                    connection, transaction, aulaId.Value, participant.AlunoId,
+                    actualTeacher == request.ProfessoraId ? "aula_normal_remarcada" : "professora_substituida",
+                    $"{actualDate:yyyy-MM-dd} {occurrence.HoraInicio:HH:mm}",
+                    $"{request.Data:yyyy-MM-dd} {request.HoraInicio:HH:mm}",
+                    history, request.UsuarioAuthId, request.UsuarioNome, cancellationToken);
+
+            await transaction.CommitAsync(cancellationToken);
+            committed = true;
+            return await BuscarOcorrenciaAsync($"a:{aulaId.Value}:{participants[0].AlunoId}", request.ProfessoraId, cancellationToken)
+                ?? throw new RegistroAulaNotFoundException("A aula foi salva, mas não pôde ser recarregada.");
+        }
+        catch (PostgresException ex) when (ex.SqlState is "40001" or "23505")
+        {
+            if (!committed) await transaction.RollbackAsync(cancellationToken);
+            throw new RegistroAulaConflictException("A agenda foi alterada simultaneamente ou há agendamento duplicado. Recarregue o calendário.");
+        }
+        catch
+        {
+            if (!committed) await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
     public async Task<OcorrenciaAulaData> CancelarOcorrenciaAsync(
         CancelarOcorrenciaPersistenciaRequest request,
         CancellationToken cancellationToken)
@@ -589,6 +885,22 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
 
             if (!await TeacherExistsAsync(connection, transaction, request.ProfessoraId, cancellationToken))
                 throw new RegistroAulaNotFoundException("A professora selecionada não foi encontrada ou está inativa.");
+
+            const string closedPeriodSql = """
+                select exists (
+                    select 1 from public.fechamentos_professoras
+                    where professora_id = @professora
+                      and competencia = date_trunc('month', @data::date)::date
+                      and status in ('Aprovado','Pago')
+                );
+                """;
+            await using (var check = new NpgsqlCommand(closedPeriodSql, connection, transaction))
+            {
+                check.Parameters.AddWithValue("professora", request.ProfessoraId);
+                check.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
+                if (Convert.ToBoolean(await check.ExecuteScalarAsync(cancellationToken)))
+                    throw new RegistroAulaConflictException("O mês da professora está aprovado ou pago. Não é possível acrescentar aula retroativa sem conciliação financeira.");
+            }
 
             foreach (var alunoId in alunoIds)
             {
@@ -1161,6 +1473,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     limit 1
                 ) real on true
                 where h.ativo = true
+                  and not exists (
+                      select 1 from public.aulas_excecoes_grade eg
+                      where eg.horario_recorrente_aluno_id = h.id and eg.data_original = @data
+                  )
                   and h.dia_semana = extract(dow from @data::date)::smallint
                   and h.data_inicio <= @data
                   and (h.data_fim is null or h.data_fim >= @data)
@@ -1276,6 +1592,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                 ) real on true
                 where h.professora_id = @professora_id
                   and h.ativo = true
+                  and not exists (
+                      select 1 from public.aulas_excecoes_grade eg
+                      where eg.horario_recorrente_aluno_id = h.id and eg.data_original = @data
+                  )
                   and h.id <> coalesce(@horario_id, '00000000-0000-0000-0000-000000000000'::uuid)
                   and h.dia_semana = extract(dow from @data::date)::smallint
                   and h.data_inicio <= @data

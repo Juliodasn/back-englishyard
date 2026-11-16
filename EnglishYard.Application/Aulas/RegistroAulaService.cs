@@ -40,10 +40,8 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
         if (request.Observacao?.Trim().Length > 1000)
             throw new RegistroAulaValidationException("A observação pode ter no máximo 1000 caracteres.");
 
-        var agora = ObterAgoraSaoPaulo();
-        var inicio = Combinar(request.Data, request.HoraInicio, agora.Offset);
-        if (inicio < agora.AddMinutes(-1))
-            throw new RegistroAulaValidationException("A nova aula deve ser agendada para um horário atual ou futuro.");
+        // Datas passadas também podem ser registradas, desde que o período
+        // financeiro não tenha sido aprovado/pago (checado no repositório).
 
         if (!administrador)
         {
@@ -161,6 +159,39 @@ public sealed class RegistroAulaService(IRegistroAulaRepository repository)
                 usuarioNome),
             cancellationToken);
 
+        return Map(atualizado, ObterAgoraSaoPaulo());
+    }
+
+    public async Task<RegistroAulaDiaResponse> RemarcarAulaNormalAsync(
+        RemarcarAulaNormalRequest request,
+        Guid? professoraLogadaId,
+        Guid usuarioAuthId,
+        string usuarioNome,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.OcorrenciaId))
+            throw new RegistroAulaValidationException("Selecione a aula que deseja alterar.");
+        if (request.ProfessoraId == Guid.Empty)
+            throw new RegistroAulaValidationException("Selecione a professora que irá ministrar a aula.");
+        if (request.HoraFim <= request.HoraInicio)
+            throw new RegistroAulaValidationException("O horário final deve ser posterior ao inicial.");
+        if (request.Observacao?.Trim().Length > 1000)
+            throw new RegistroAulaValidationException("A observação pode ter no máximo 1000 caracteres.");
+
+        // A busca filtrada por professora faz a autorização também no banco;
+        // só quem é dono da ocorrência pode transferi-la para outra professora.
+        var ocorrencia = await repository.BuscarOcorrenciaAsync(request.OcorrenciaId, professoraLogadaId, cancellationToken)
+            ?? throw new RegistroAulaNotFoundException("A aula não foi encontrada ou não pertence à professora logada.");
+        if (ocorrencia.EhReposicao)
+            throw new RegistroAulaValidationException("Reagende reposições pela tela de Reposições.");
+        if (ocorrencia.ParticipanteStatus != "agendado")
+            throw new RegistroAulaConflictException("Uma aula com resultado ou cancelamento não pode ser remarcada aqui.");
+
+        var atualizado = await repository.RemarcarAulaNormalAsync(
+            new RemarcarAulaNormalPersistenciaRequest(
+                ocorrencia, request.Data, request.HoraInicio, request.HoraFim,
+                request.ProfessoraId, request.Observacao?.Trim(), usuarioAuthId, usuarioNome),
+            cancellationToken);
         return Map(atualizado, ObterAgoraSaoPaulo());
     }
 

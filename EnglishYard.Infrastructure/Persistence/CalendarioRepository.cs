@@ -87,6 +87,10 @@ public sealed class CalendarioRepository(NpgsqlDataSource dataSource) : ICalenda
                   and (a.status in ('Ativo','Experimental','Inadimplente') or d.data < (now() at time zone 'America/Sao_Paulo')::date)
                   and (p.status = 'Ativa' or d.data < (now() at time zone 'America/Sao_Paulo')::date)
                   and (@professora_id is null or p.id = @professora_id)
+                  and not exists (
+                      select 1 from public.aulas_excecoes_grade eg
+                      where eg.horario_recorrente_aluno_id = h.id and eg.data_original = d.data
+                  )
                   and h.data_inicio <= d.data
                   and (h.data_fim is null or h.data_fim >= d.data)
             ), aulas_avulsas as (

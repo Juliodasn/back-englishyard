@@ -5,6 +5,50 @@ namespace EnglishYard.Tests;
 public sealed class RegistroAulaServiceTests
 {
     [Fact]
+    public async Task RemarcarNormal_PermiteDataAtualEProfessoraSubstituta_SemGerarReposicao()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(1)), "agendado");
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+        var substituta = Guid.NewGuid();
+        var hoje = DateOnly.FromDateTime(DateTime.UtcNow);
+        var result = await service.RemarcarAulaNormalAsync(
+            new RemarcarAulaNormalRequest(occurrence.OcorrenciaId, hoje,
+                new TimeOnly(16, 0), new TimeOnly(17, 0), substituta, "Mudança de hoje"),
+            occurrence.ProfessoraId, Guid.NewGuid(), "Professora", CancellationToken.None);
+        Assert.Equal(hoje, repository.LastNormalRescheduleRequest!.Data);
+        Assert.Equal(substituta, repository.LastNormalRescheduleRequest.ProfessoraId);
+        Assert.Equal(substituta, result.ProfessoraId);
+    }
+
+    [Fact]
+    public async Task RemarcarNormal_RejeitaReposicao()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(1)), "agendado")
+            with { EhReposicao = true };
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+        await Assert.ThrowsAsync<RegistroAulaValidationException>(() => service.RemarcarAulaNormalAsync(
+            new RemarcarAulaNormalRequest(occurrence.OcorrenciaId, occurrence.Data,
+                new TimeOnly(14, 0), new TimeOnly(15, 0), occurrence.ProfessoraId, null),
+            occurrence.ProfessoraId, Guid.NewGuid(), "Professora", CancellationToken.None));
+        Assert.Null(repository.LastNormalRescheduleRequest);
+    }
+
+    [Fact]
+    public async Task RemarcarNormal_ProfessoraNaoPodeAlterarAulaDeColega()
+    {
+        var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(1)), "agendado");
+        var repository = new FakeRepository(occurrence);
+        var service = new RegistroAulaService(repository);
+        await Assert.ThrowsAsync<RegistroAulaNotFoundException>(() => service.RemarcarAulaNormalAsync(
+            new RemarcarAulaNormalRequest(occurrence.OcorrenciaId, occurrence.Data,
+                new TimeOnly(14, 0), new TimeOnly(15, 0), occurrence.ProfessoraId, null),
+            Guid.NewGuid(), Guid.NewGuid(), "Outra professora", CancellationToken.None));
+        Assert.Null(repository.LastNormalRescheduleRequest);
+    }
+
+    [Fact]
     public async Task AgendarAulaAvulsa_Admin_EncaminhaAulaParaRepositorio()
     {
         var occurrence = CreateOccurrence(DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)), "agendado") with
@@ -348,7 +392,7 @@ public sealed class RegistroAulaServiceTests
             Task.FromResult<IReadOnlyList<OcorrenciaAulaData>>(new[] { current });
 
         public Task<OcorrenciaAulaData?> BuscarOcorrenciaAsync(string ocorrenciaId, Guid? professoraId, CancellationToken cancellationToken) =>
-            Task.FromResult<OcorrenciaAulaData?>(current.OcorrenciaId == ocorrenciaId ? current : null);
+            Task.FromResult<OcorrenciaAulaData?>(current.OcorrenciaId == ocorrenciaId && (!professoraId.HasValue || professoraId.Value == current.ProfessoraId) ? current : null);
 
         public Task<OcorrenciaAulaData> RegistrarResultadoAsync(RegistroAulaPersistenciaRequest request, CancellationToken cancellationToken)
         {
@@ -383,6 +427,20 @@ public sealed class RegistroAulaServiceTests
             LastCancellationRequest = request;
             current = current with { ParticipanteStatus = "cancelada", PossuiRegistroReal = true, Observacao = request.Motivo };
             return Task.FromResult(current);
+        }
+
+        public RemarcarAulaNormalPersistenciaRequest? LastNormalRescheduleRequest { get; private set; }
+
+        public Task<OcorrenciaAulaData> RemarcarAulaNormalAsync(
+            RemarcarAulaNormalPersistenciaRequest request, CancellationToken cancellationToken)
+        {
+            LastNormalRescheduleRequest = request;
+            return Task.FromResult(current with {
+                Data = request.Data,
+                HoraInicio = request.HoraInicio,
+                HoraFim = request.HoraFim,
+                ProfessoraId = request.ProfessoraId
+            });
         }
 
         public Task<OcorrenciaAulaData> AgendarAulaAvulsaAsync(AgendarAulaAvulsaPersistenciaRequest request, CancellationToken cancellationToken)

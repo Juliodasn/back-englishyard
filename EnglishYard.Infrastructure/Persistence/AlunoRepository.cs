@@ -1124,6 +1124,12 @@ public sealed class AlunoRepository(NpgsqlDataSource dataSource) : IAlunoReposit
                   and au.status <> 'cancelada'
                   and aa.status <> 'cancelada'
                   and au.data_aula = (now() at time zone 'America/Sao_Paulo')::date
+            ) or exists (
+                -- Uma aula de hoje movida para amanhã também pertence à grade de hoje.
+                select 1 from public.aulas_excecoes_grade eg
+                join public.horarios_recorrentes_alunos h on h.id = eg.horario_recorrente_aluno_id
+                where h.aluno_id = @aluno_id
+                  and eg.data_original = (now() at time zone 'America/Sao_Paulo')::date
             );
             """;
         await using var command = new NpgsqlCommand(sql, connection, transaction);

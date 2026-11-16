@@ -218,7 +218,7 @@ public sealed class AlunosController(AlunoService service) : ControllerBase
     }
 
     [HttpGet("professoras")]
-    [Authorize(Roles = PortalRoles.Administrador)]
+    [Authorize(Roles = PortalRoles.Administrador + "," + PortalRoles.Professora)]
     [ProducesResponseType<IReadOnlyList<ProfessoraResumoResponse>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<ProfessoraResumoResponse>>> ListarProfessoras(CancellationToken cancellationToken)
     {

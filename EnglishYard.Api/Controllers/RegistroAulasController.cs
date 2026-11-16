@@ -115,6 +115,24 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         }
     }
 
+    [HttpPost("remarcar-normal")]
+    public async Task<ActionResult<RegistroAulaDiaResponse>> RemarcarNormal(
+        RemarcarAulaNormalRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetProfessoraFilter(out var professoraId)) return Forbid();
+        if (!TryGetAuthUserId(out var authUserId)) return Forbid();
+        try
+        {
+            return Ok(await service.RemarcarAulaNormalAsync(
+                request, professoraId, authUserId,
+                User.Identity?.Name ?? "Usuário do portal", cancellationToken));
+        }
+        catch (RegistroAulaValidationException ex) { return Problem(statusCode: 400, detail: ex.Message); }
+        catch (RegistroAulaNotFoundException ex) { return Problem(statusCode: 404, detail: ex.Message); }
+        catch (RegistroAulaConflictException ex) { return Problem(statusCode: 409, detail: ex.Message); }
+    }
+
     [HttpPost("cancelar")]
     public async Task<ActionResult<RegistroAulaDiaResponse>> CancelarOcorrencia(
         CancelarOcorrenciaAulaRequest request,
