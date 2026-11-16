@@ -565,10 +565,89 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("d",NpgsqlDbType.Date,request.DataPagamento);cmd.Parameters.Add(new NpgsqlParameter("x",NpgsqlDbType.Text){Value=request.ComprovanteUrl??(object)DBNull.Value});return await cmd.ExecuteScalarAsync(ct)is not null;
     }
 
-    public async Task<bool> ReabrirFechamentoAsync(Guid professoraId,DateOnly competencia,string motivo,Guid usuarioId,CancellationToken ct)
+    public async Task<bool> ReabrirFechamentoAsync(Guid professoraId, DateOnly competencia, string motivo, bool confirmoPagamentoNaoRealizado, Guid usuarioId, CancellationToken ct)
     {
-        const string sql="""update public.fechamentos_professoras set status='Em conferência',aprovado_em=null,pago_em=null,data_pagamento=null,comprovante_url=null,atualizado_em=now() where professora_id=@p and competencia=@c returning id;""";
-        await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);return await cmd.ExecuteScalarAsync(ct)is not null;
+        // Reverter uma marcação equivocada de pagamento não equivale a estornar uma
+        // transferência real. Em ambos os casos, a alteração deve ficar auditável.
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        try
+        {
+            Guid fechamentoId;
+            string statusAnterior;
+            decimal valorAnterior;
+            DateOnly? dataPagamentoAnterior;
+            DateTimeOffset? pagoEmAnterior;
+            string? comprovanteAnterior;
+            const string lookupSql = """
+                select id, status, valor_total, data_pagamento, pago_em, comprovante_url
+                from public.fechamentos_professoras
+                where professora_id = @p and competencia = @c
+                for update;
+                """;
+            await using (var lookup = new NpgsqlCommand(lookupSql, connection, transaction))
+            {
+                lookup.Parameters.AddWithValue("p", professoraId);
+                lookup.Parameters.AddWithValue("c", NpgsqlDbType.Date, competencia);
+                await using var reader = await lookup.ExecuteReaderAsync(ct);
+                if (!await reader.ReadAsync(ct)) return false;
+                fechamentoId = reader.GetGuid(0);
+                statusAnterior = reader.GetString(1);
+                valorAnterior = reader.GetDecimal(2);
+                dataPagamentoAnterior = reader.IsDBNull(3) ? null : reader.GetFieldValue<DateOnly>(3);
+                pagoEmAnterior = reader.IsDBNull(4) ? null : reader.GetFieldValue<DateTimeOffset>(4);
+                comprovanteAnterior = reader.IsDBNull(5) ? null : reader.GetString(5);
+            }
+
+            if (statusAnterior is not ("Aprovado" or "Pago"))
+                throw new FinanceiroConflitoException("Este fechamento já está em conferência.");
+            if (statusAnterior == "Pago" && !confirmoPagamentoNaoRealizado)
+                throw new FinanceiroConflitoException("Pagamento marcado como realizado. Só é possível desfazer o registro quando nenhuma transferência ocorreu. Se o dinheiro foi enviado, é necessário um ajuste financeiro, sem apagar o histórico.");
+
+            const string auditSql = """
+                insert into public.historico_fechamentos_professoras
+                    (fechamento_id, professora_id, competencia, status_anterior, status_novo,
+                     valor_total_anterior, data_pagamento_anterior, pago_em_anterior,
+                     comprovante_url_anterior, motivo, confirmou_sem_transferencia, alterado_por)
+                values
+                    (@id, @p, @c, @status, 'Em conferência', @valor, @data_pagamento,
+                     @pago_em, @comprovante, @motivo, @confirmacao, @usuario);
+                """;
+            await using (var audit = new NpgsqlCommand(auditSql, connection, transaction))
+            {
+                audit.Parameters.AddWithValue("id", fechamentoId);
+                audit.Parameters.AddWithValue("p", professoraId);
+                audit.Parameters.AddWithValue("c", NpgsqlDbType.Date, competencia);
+                audit.Parameters.AddWithValue("status", statusAnterior);
+                audit.Parameters.AddWithValue("valor", NpgsqlDbType.Numeric, valorAnterior);
+                audit.Parameters.Add(new NpgsqlParameter("data_pagamento", NpgsqlDbType.Date) { Value = dataPagamentoAnterior.HasValue ? dataPagamentoAnterior.Value : DBNull.Value });
+                audit.Parameters.Add(new NpgsqlParameter("pago_em", NpgsqlDbType.TimestampTz) { Value = pagoEmAnterior.HasValue ? pagoEmAnterior.Value : DBNull.Value });
+                audit.Parameters.Add(new NpgsqlParameter("comprovante", NpgsqlDbType.Text) { Value = comprovanteAnterior ?? (object)DBNull.Value });
+                audit.Parameters.AddWithValue("motivo", motivo);
+                audit.Parameters.AddWithValue("confirmacao", statusAnterior == "Pago" && confirmoPagamentoNaoRealizado);
+                audit.Parameters.AddWithValue("usuario", usuarioId);
+                await audit.ExecuteNonQueryAsync(ct);
+            }
+            const string updateSql = """
+                update public.fechamentos_professoras
+                   set status = 'Em conferência', aprovado_em = null, aprovado_por = null,
+                       pago_em = null, data_pagamento = null, comprovante_url = null,
+                       atualizado_em = now()
+                 where id = @id;
+                """;
+            await using (var update = new NpgsqlCommand(updateSql, connection, transaction))
+            {
+                update.Parameters.AddWithValue("id", fechamentoId);
+                await update.ExecuteNonQueryAsync(ct);
+            }
+            await transaction.CommitAsync(ct);
+            return true;
+        }
+        catch
+        {
+            await transaction.RollbackAsync(ct);
+            throw;
+        }
     }
 
     public async Task<PoliticaPagamentoResponse?> ObterPoliticaPagamentoAsync(DateOnly data,CancellationToken ct)

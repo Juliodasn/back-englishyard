@@ -162,7 +162,7 @@ public sealed record MarcarDespesaPagaRequest(
     DateOnly? DataPagamento,
     string? FormaPagamento);
 
-public sealed record MotivoOperacaoFinanceiraRequest(string Motivo);
+public sealed record MotivoOperacaoFinanceiraRequest(string Motivo, bool ConfirmoPagamentoNaoRealizado = false);
 
 public sealed record AjustarMensalidadeRequest(decimal Desconto, string Motivo);
 

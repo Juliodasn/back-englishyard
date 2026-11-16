@@ -169,7 +169,7 @@ public sealed class FinanceiroController(FinanceiroService service) : Controller
     [HttpPost("professoras/{professoraId:guid}/fechamentos/reabrir")]
     [Authorize(Roles = PortalRoles.Administrador)]
     public async Task<IActionResult> ReabrirFechamento(Guid professoraId, [FromQuery] string? competencia, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
-        await ExecuteAdminMutation(id => service.ReabrirFechamentoAsync(professoraId, ParseCompetencia(competencia), request.Motivo, id, ct));
+        await ExecuteAdminMutation(id => service.ReabrirFechamentoAsync(professoraId, ParseCompetencia(competencia), request.Motivo, request.ConfirmoPagamentoNaoRealizado, id, ct));
 
     [HttpGet("politica-pagamento")]
     [Authorize(Roles = PortalRoles.Administrador)]

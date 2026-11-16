@@ -111,7 +111,13 @@ public sealed class FinanceiroService(IFinanceiroRepository repository)
     public Task<bool> ExcluirAjusteProfessoraAsync(Guid id, Guid usuarioId, CancellationToken ct) => repository.ExcluirAjusteProfessoraAsync(id, usuarioId, ct);
     public Task<bool> AprovarFechamentoAsync(Guid professoraId, DateOnly competencia, Guid usuarioId, CancellationToken ct) => repository.AprovarFechamentoAsync(professoraId, PrimeiroDia(competencia), usuarioId, ct);
     public Task<bool> MarcarFechamentoPagoAsync(Guid professoraId, DateOnly competencia, MarcarFechamentoPagoRequest request, Guid usuarioId, CancellationToken ct) => repository.MarcarFechamentoPagoAsync(professoraId, PrimeiroDia(competencia), request, usuarioId, ct);
-    public Task<bool> ReabrirFechamentoAsync(Guid professoraId, DateOnly competencia, string motivo, Guid usuarioId, CancellationToken ct) => repository.ReabrirFechamentoAsync(professoraId, PrimeiroDia(competencia), ExigirMotivo(motivo), usuarioId, ct);
+    public Task<bool> ReabrirFechamentoAsync(Guid professoraId, DateOnly competencia, string motivo, bool confirmoPagamentoNaoRealizado, Guid usuarioId, CancellationToken ct)
+    {
+        var motivoValidado = ExigirMotivo(motivo);
+        if (motivoValidado.Length < 10)
+            throw new FinanceiroValidationException("Informe o motivo da correção com pelo menos 10 caracteres.");
+        return repository.ReabrirFechamentoAsync(professoraId, PrimeiroDia(competencia), motivoValidado, confirmoPagamentoNaoRealizado, usuarioId, ct);
+    }
     public Task<PoliticaPagamentoResponse?> ObterPoliticaPagamentoAsync(DateOnly data, CancellationToken ct) => repository.ObterPoliticaPagamentoAsync(data, ct);
     public Task<PoliticaPagamentoResponse> SalvarPoliticaPagamentoAsync(SalvarPoliticaPagamentoRequest request, Guid usuarioId, CancellationToken ct) => repository.SalvarPoliticaPagamentoAsync(request, usuarioId, ct);
 
