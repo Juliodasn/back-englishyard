@@ -4,7 +4,7 @@ using NpgsqlTypes;
 
 namespace EnglishYard.Infrastructure.Persistence;
 
-public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinanceiroRepository
+public sealed partial class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinanceiroRepository
 {
     private sealed record RateRow(DateOnly Desde, DateOnly? Ate, decimal Individual, decimal Dupla, decimal Grupo);
     private sealed record ScheduleRow(Guid Id, short DiaSemana, TimeOnly Inicio, TimeOnly Fim, DateOnly DataInicio, DateOnly? DataFim, Guid AlunoId, string AlunoNome);
@@ -39,7 +39,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         var despesasPrevistas = despesas.Where(item => item.Status != "Cancelada").Sum(item => item.Valor);
         var despesasPagas = despesas.Where(item => item.Status == "Paga").Sum(item => item.Valor);
         var professorasPrevisto = professoras.Sum(item => item.ValorPrevisto + item.Ajustes);
-        var professorasPago = professoras.Where(item => item.StatusFechamento == "Pago").Sum(item => item.ValorTotal);
+        var professorasPago = professoras.Sum(item => item.ValorPago);
 
         return new FinanceiroResumoResponse(
             $"{competencia:yyyy-MM}",
@@ -191,12 +191,13 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         var adjustments = adjustmentItems.Sum(item => item.Valor);
         var closing = await ObterClosingAsync(professoraId, competencia, cancellationToken);
         var realizedTotal = entries.Sum(item => item.ValorRealizado);
-        var frozen = closing.Status is "Aprovado" or "Pago";
-        var displayedRealized = frozen ? closing.ValorAulas : realizedTotal;
-        var displayedAdjustments = frozen ? closing.ValorAjustes : adjustments;
-        var displayedTotal = frozen ? closing.ValorTotal : realizedTotal + adjustments;
+        // O resumo parcial separa snapshots quitados, lotes aprovados e saldo novo.
+        // A atividade do mês permanece dinâmica, mesmo depois de pagamento anterior.
+        var displayedRealized = realizedTotal;
+        var displayedAdjustments = adjustments;
+        var displayedTotal = realizedTotal + adjustments;
 
-        return new DemonstrativoProfessoraResponse(
+        var demonstrativo = new DemonstrativoProfessoraResponse(
             teacherId,
             teacherName,
             teacherEmail,
@@ -213,11 +214,11 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             entries.Count(item => item.ValorRealizado > 0),
             entries.Count(item => item.Status == "Realizada" || item.Status.StartsWith("Realizada ·", StringComparison.Ordinal)),
             entries.Count(item => item.Status.Contains("Falta do aluno", StringComparison.OrdinalIgnoreCase)),
-            frozen ? closing.Reposicoes : entries.Count(item => item.Status == "Reposição realizada"),
+            entries.Count(item => item.Status == "Reposição realizada"),
             entries.Count(item => item.Status.StartsWith("Remarcada", StringComparison.OrdinalIgnoreCase)),
-            frozen ? closing.Individuais : entries.Count(item => item.Tipo == "Individual"),
-            frozen ? closing.Duplas : entries.Count(item => item.Tipo == "Dupla"),
-            frozen ? closing.Grupos : entries.Count(item => item.Tipo == "Grupo"),
+            entries.Count(item => item.Tipo == "Individual"),
+            entries.Count(item => item.Tipo == "Dupla"),
+            entries.Count(item => item.Tipo == "Grupo"),
             entries.Sum(item => item.ValorPrevisto),
             displayedRealized,
             displayedAdjustments,
@@ -229,6 +230,8 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
             closing.PagoEm,
             adjustmentItems,
             entries);
+        return await CompletarDemonstrativoLotesAsync(demonstrativo,
+            closing.Status, closing.ValorTotal, closing.PagoEm, cancellationToken);
     }
 
     public async Task RegistrarRecebimentoAsync(
@@ -541,29 +544,25 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
 
     public async Task<Guid> CriarAjusteProfessoraAsync(Guid professoraId,DateOnly competencia,CriarAjusteProfessoraRequest request,Guid usuarioId,CancellationToken ct)
     {
-        const string sql="""insert into public.ajustes_pagamento_professoras(professora_id,competencia,descricao,valor,criado_por) select @p,@c,@d,@v,@u where not exists(select 1 from public.fechamentos_professoras where professora_id=@p and competencia=@c and status in ('Aprovado','Pago')) returning id;""";
+        const string sql="""insert into public.ajustes_pagamento_professoras(professora_id,competencia,descricao,valor,criado_por) select @p,@c,@d,@v,@u where not exists(select 1 from public.fechamentos_professoras where professora_id=@p and competencia=@c and status='Aprovado') returning id;""";
         await using var command=dataSource.CreateCommand(sql); command.Parameters.AddWithValue("p",professoraId); command.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia); command.Parameters.AddWithValue("d",request.Descricao); command.Parameters.AddWithValue("v",NpgsqlDbType.Numeric,request.Valor); command.Parameters.AddWithValue("u",usuarioId);
         return (Guid)(await command.ExecuteScalarAsync(ct)??throw new FinanceiroConflitoException("O fechamento aprovado ou pago não aceita ajustes."));
     }
 
     public async Task<bool> ExcluirAjusteProfessoraAsync(Guid id,Guid usuarioId,CancellationToken ct)
     {
-        const string sql="""delete from public.ajustes_pagamento_professoras a where id=@id and not exists(select 1 from public.fechamentos_professoras f where f.professora_id=a.professora_id and f.competencia=a.competencia and f.status in ('Aprovado','Pago')) returning id;""";
+        const string sql="""delete from public.ajustes_pagamento_professoras a where id=@id and not exists(select 1 from public.fechamentos_professoras f where f.professora_id=a.professora_id and f.competencia=a.competencia and (f.status='Aprovado' or (f.status='Pago' and a.criado_em<=f.pago_em))) returning id;""";
         await using var command=dataSource.CreateCommand(sql); command.Parameters.AddWithValue("id",id); return await command.ExecuteScalarAsync(ct) is not null;
     }
 
-    public async Task<bool> AprovarFechamentoAsync(Guid professoraId,DateOnly competencia,Guid usuarioId,CancellationToken ct)
-    {
-        var s=await ObterDemonstrativoProfessoraAsync(professoraId,competencia,ct); if(s is null)return false;
-        const string sql="""insert into public.fechamentos_professoras(professora_id,competencia,quantidade_aulas_individuais,quantidade_aulas_dupla,quantidade_aulas_grupo,quantidade_reposicoes,quantidade_aulas_perdidas,valor_aulas,valor_ajustes,valor_total,status,aprovado_em,aprovado_por) values(@p,@c,@i,@d,@g,@r,@f,@a,@j,@t,'Aprovado',now(),@u) on conflict(professora_id,competencia) do update set quantidade_aulas_individuais=excluded.quantidade_aulas_individuais,quantidade_aulas_dupla=excluded.quantidade_aulas_dupla,quantidade_aulas_grupo=excluded.quantidade_aulas_grupo,quantidade_reposicoes=excluded.quantidade_reposicoes,quantidade_aulas_perdidas=excluded.quantidade_aulas_perdidas,valor_aulas=excluded.valor_aulas,valor_ajustes=excluded.valor_ajustes,valor_total=excluded.valor_total,status='Aprovado',aprovado_em=now(),aprovado_por=@u where fechamentos_professoras.status<>'Pago' returning id;""";
-        await using var cmd=dataSource.CreateCommand(sql); cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("i",s.AulasIndividuais);cmd.Parameters.AddWithValue("d",s.AulasDupla);cmd.Parameters.AddWithValue("g",s.AulasGrupo);cmd.Parameters.AddWithValue("r",s.ReposicoesRealizadas);cmd.Parameters.AddWithValue("f",s.FaltasAluno);cmd.Parameters.AddWithValue("a",NpgsqlDbType.Numeric,s.ValorRealizado);cmd.Parameters.AddWithValue("j",NpgsqlDbType.Numeric,s.Ajustes);cmd.Parameters.AddWithValue("t",NpgsqlDbType.Numeric,s.ValorTotal);cmd.Parameters.AddWithValue("u",usuarioId); return await cmd.ExecuteScalarAsync(ct)is not null;
-    }
+    // A partir da migração 27, aprova um lote de itens ainda não quitados,
+    // nunca substitui o fechamento mensal legado nem aprova novamente os mesmos itens.
+    public Task<bool> AprovarFechamentoAsync(Guid professoraId, DateOnly competencia,
+        Guid usuarioId, CancellationToken ct) => AprovarLoteAsync(professoraId, competencia, usuarioId, ct);
 
-    public async Task<bool> MarcarFechamentoPagoAsync(Guid professoraId,DateOnly competencia,MarcarFechamentoPagoRequest request,Guid usuarioId,CancellationToken ct)
-    {
-        const string sql="""update public.fechamentos_professoras set status='Pago',pago_em=now(),data_pagamento=@d,comprovante_url=@x,atualizado_em=now() where professora_id=@p and competencia=@c and status='Aprovado' returning id;""";
-        await using var cmd=dataSource.CreateCommand(sql);cmd.Parameters.AddWithValue("p",professoraId);cmd.Parameters.AddWithValue("c",NpgsqlDbType.Date,competencia);cmd.Parameters.AddWithValue("d",NpgsqlDbType.Date,request.DataPagamento);cmd.Parameters.Add(new NpgsqlParameter("x",NpgsqlDbType.Text){Value=request.ComprovanteUrl??(object)DBNull.Value});return await cmd.ExecuteScalarAsync(ct)is not null;
-    }
+    public Task<bool> MarcarFechamentoPagoAsync(Guid professoraId, DateOnly competencia,
+        MarcarFechamentoPagoRequest request, Guid usuarioId, CancellationToken ct) =>
+        PagarLoteAsync(professoraId, competencia, request, usuarioId, ct);
 
     public async Task<bool> ReabrirFechamentoAsync(Guid professoraId, DateOnly competencia, string motivo, bool confirmoPagamentoNaoRealizado, Guid usuarioId, CancellationToken ct)
     {
@@ -573,6 +572,7 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
         await using var transaction = await connection.BeginTransactionAsync(ct);
         try
         {
+            await TravarPagamentoAsync(connection, transaction, professoraId, competencia, ct);
             Guid fechamentoId;
             string statusAnterior;
             decimal valorAnterior;
@@ -601,6 +601,16 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
 
             if (statusAnterior is not ("Aprovado" or "Pago"))
                 throw new FinanceiroConflitoException("Este fechamento já está em conferência.");
+            await using (var existingLots = new NpgsqlCommand("""
+                select exists(select 1 from public.lotes_pagamento_professoras
+                where professora_id=@p and competencia=@c and status in ('Aprovado','Pago'));
+                """, connection, transaction))
+            {
+                existingLots.Parameters.AddWithValue("p", professoraId);
+                existingLots.Parameters.AddWithValue("c", NpgsqlDbType.Date, competencia);
+                if (Convert.ToBoolean(await existingLots.ExecuteScalarAsync(ct)))
+                    throw new FinanceiroConflitoException("Há lotes posteriores vinculados a este fechamento antigo. Faça uma conciliação administrativa antes de revertê-lo.");
+            }
             if (statusAnterior == "Pago" && !confirmoPagamentoNaoRealizado)
                 throw new FinanceiroConflitoException("Pagamento marcado como realizado. Só é possível desfazer o registro quando nenhuma transferência ocorreu. Se o dinheiro foi enviado, é necessário um ajuste financeiro, sem apagar o histórico.");
 
@@ -896,7 +906,12 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 statement.Ajustes,
                 statement.ValorTotal,
                 statement.StatusFechamento,
-                statement.DataPagamento));
+                statement.DataPagamento)
+            {
+                ValorPago = statement.ValorPago,
+                ValorPendente = statement.ValorPendente,
+                ValorAprovado = statement.ValorAprovado
+            });
         }
         return result;
     }
@@ -934,6 +949,15 @@ public sealed class FinanceiroRepository(NpgsqlDataSource dataSource) : IFinance
                 join public.professoras p on p.id = f.professora_id
                 where f.status = 'Pago'
                   and f.data_pagamento >= @inicio and f.data_pagamento < @fim
+
+                union all
+
+                select l.id, l.data_pagamento as data, 'Saída'::text as tipo,
+                       ('Pagamento parcial · ' || p.nome)::text as descricao,
+                       'Professoras'::text as categoria, l.valor_total as valor
+                from public.lotes_pagamento_professoras l
+                join public.professoras p on p.id=l.professora_id
+                where l.status='Pago' and l.data_pagamento>=@inicio and l.data_pagamento<@fim
             ) movimentos
             where data is not null
             order by data desc, descricao;

@@ -67,7 +67,12 @@ public sealed record PagamentoProfessoraResumoResponse(
     decimal Ajustes,
     decimal ValorTotal,
     string StatusFechamento,
-    DateOnly? DataPagamento);
+    DateOnly? DataPagamento)
+{
+    public decimal ValorPago { get; init; }
+    public decimal ValorPendente { get; init; }
+    public decimal ValorAprovado { get; init; }
+}
 
 public sealed record FinanceiroResumoResponse(
     string Competencia,
@@ -99,13 +104,27 @@ public sealed record AulaPagamentoProfessoraResponse(
     string Status,
     bool PossuiRegistroReal,
     decimal ValorPrevisto,
-    decimal ValorRealizado);
+    decimal ValorRealizado)
+{
+    public string StatusQuitacao { get; init; } = "Pendente";
+}
 
 public sealed record AjustePagamentoProfessoraResponse(
     Guid Id,
     string Descricao,
     decimal Valor,
     DateTimeOffset CriadoEm);
+
+public sealed record LotePagamentoProfessoraResponse(
+    Guid Id,
+    string Status,
+    decimal ValorAulas,
+    decimal ValorAjustes,
+    decimal ValorTotal,
+    DateTimeOffset AprovadoEm,
+    DateOnly? DataPagamento,
+    DateTimeOffset? PagoEm,
+    string? ComprovanteUrl);
 
 public sealed record DemonstrativoProfessoraResponse(
     Guid ProfessoraId,
@@ -139,7 +158,15 @@ public sealed record DemonstrativoProfessoraResponse(
     DateTimeOffset? AprovadoEm,
     DateTimeOffset? PagoEm,
     IReadOnlyList<AjustePagamentoProfessoraResponse> AjustesDetalhes,
-    IReadOnlyList<AulaPagamentoProfessoraResponse> Aulas);
+    IReadOnlyList<AulaPagamentoProfessoraResponse> Aulas)
+{
+    public decimal ValorPago { get; init; }
+    public decimal ValorPendente { get; init; }
+    public decimal ValorAprovado { get; init; }
+    public bool PossuiFechamentoLegado { get; init; }
+    public decimal ValorPagoLegado { get; init; }
+    public IReadOnlyList<LotePagamentoProfessoraResponse> LotesPagamento { get; init; } = [];
+}
 
 public sealed record RegistrarRecebimentoRequest(
     decimal Valor,

@@ -3,6 +3,7 @@ using EnglishYard.Application.Aulas;
 using EnglishYard.Application.Autenticacao;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Npgsql;
 
 namespace EnglishYard.Api.Controllers;
 
@@ -50,6 +51,12 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         {
             return Problem(statusCode: StatusCodes.Status409Conflict, detail: exception.Message);
         }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation &&
+            exception.MessageText.Contains("lote financeiro", StringComparison.OrdinalIgnoreCase))
+        {
+            return Problem(statusCode: StatusCodes.Status409Conflict,
+                detail: "Esta aula já está incluída em um pagamento aprovado ou pago. Faça ajuste financeiro pelo administrador.");
+        }
     }
 
     [HttpPost("resultado")]
@@ -82,6 +89,12 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         {
             return Problem(statusCode: StatusCodes.Status409Conflict, detail: exception.Message);
         }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation &&
+            exception.MessageText.Contains("lote financeiro", StringComparison.OrdinalIgnoreCase))
+        {
+            return Problem(statusCode: StatusCodes.Status409Conflict,
+                detail: "Esta aula já está incluída em um pagamento aprovado ou pago. Faça ajuste financeiro pelo administrador.");
+        }
     }
 
     [HttpPost("editar-ocorrencia")]
@@ -113,6 +126,12 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         {
             return Problem(statusCode: StatusCodes.Status409Conflict, detail: exception.Message);
         }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation &&
+            exception.MessageText.Contains("lote financeiro", StringComparison.OrdinalIgnoreCase))
+        {
+            return Problem(statusCode: StatusCodes.Status409Conflict,
+                detail: "Esta aula já está incluída em um pagamento aprovado ou pago. Faça ajuste financeiro pelo administrador.");
+        }
     }
 
     [HttpPost("remarcar-normal")]
@@ -131,6 +150,9 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         catch (RegistroAulaValidationException ex) { return Problem(statusCode: 400, detail: ex.Message); }
         catch (RegistroAulaNotFoundException ex) { return Problem(statusCode: 404, detail: ex.Message); }
         catch (RegistroAulaConflictException ex) { return Problem(statusCode: 409, detail: ex.Message); }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.CheckViolation &&
+            ex.MessageText.Contains("lote financeiro", StringComparison.OrdinalIgnoreCase))
+        { return Problem(statusCode: 409, detail: "Aula já vinculada a pagamento aprovado ou pago. Solicite ajuste financeiro."); }
     }
 
     [HttpPost("cancelar")]
@@ -161,6 +183,12 @@ public sealed class RegistroAulasController(RegistroAulaService service) : Contr
         catch (RegistroAulaConflictException exception)
         {
             return Problem(statusCode: StatusCodes.Status409Conflict, detail: exception.Message);
+        }
+        catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation &&
+            exception.MessageText.Contains("lote financeiro", StringComparison.OrdinalIgnoreCase))
+        {
+            return Problem(statusCode: StatusCodes.Status409Conflict,
+                detail: "Esta aula já está incluída em um pagamento aprovado ou pago. Faça ajuste financeiro pelo administrador.");
         }
     }
 

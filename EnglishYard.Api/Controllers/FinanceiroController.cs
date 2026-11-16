@@ -171,6 +171,11 @@ public sealed class FinanceiroController(FinanceiroService service) : Controller
     public async Task<IActionResult> ReabrirFechamento(Guid professoraId, [FromQuery] string? competencia, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
         await ExecuteAdminMutation(id => service.ReabrirFechamentoAsync(professoraId, ParseCompetencia(competencia), request.Motivo, request.ConfirmoPagamentoNaoRealizado, id, ct));
 
+    [HttpPost("lotes/{loteId:guid}/reverter")]
+    [Authorize(Roles = PortalRoles.Administrador)]
+    public async Task<IActionResult> ReverterLote(Guid loteId, MotivoOperacaoFinanceiraRequest request, CancellationToken ct) =>
+        await ExecuteAdminMutation(id => service.ReverterLotePagamentoAsync(loteId, request.Motivo, request.ConfirmoPagamentoNaoRealizado, id, ct));
+
     [HttpGet("politica-pagamento")]
     [Authorize(Roles = PortalRoles.Administrador)]
     public async Task<ActionResult<PoliticaPagamentoResponse>> ObterPolitica([FromQuery] DateOnly? data, CancellationToken ct)

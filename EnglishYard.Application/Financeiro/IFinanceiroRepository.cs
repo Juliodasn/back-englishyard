@@ -17,6 +17,7 @@ public interface IFinanceiroRepository
     Task<bool> ExcluirAjusteProfessoraAsync(Guid ajusteId, Guid usuarioId, CancellationToken cancellationToken);
     Task<bool> AprovarFechamentoAsync(Guid professoraId, DateOnly competencia, Guid usuarioId, CancellationToken cancellationToken);
     Task<bool> MarcarFechamentoPagoAsync(Guid professoraId, DateOnly competencia, MarcarFechamentoPagoRequest request, Guid usuarioId, CancellationToken cancellationToken);
+    Task<bool> ReverterLotePagamentoAsync(Guid loteId, string motivo, bool confirmoPagamentoNaoRealizado, Guid usuarioId, CancellationToken cancellationToken);
     Task<bool> ReabrirFechamentoAsync(Guid professoraId, DateOnly competencia, string motivo, bool confirmoPagamentoNaoRealizado, Guid usuarioId, CancellationToken cancellationToken);
     Task<PoliticaPagamentoResponse?> ObterPoliticaPagamentoAsync(DateOnly data, CancellationToken cancellationToken);
     Task<PoliticaPagamentoResponse> SalvarPoliticaPagamentoAsync(SalvarPoliticaPagamentoRequest request, Guid usuarioId, CancellationToken cancellationToken);

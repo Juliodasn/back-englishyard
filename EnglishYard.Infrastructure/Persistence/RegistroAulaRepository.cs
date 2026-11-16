@@ -618,27 +618,11 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             if (participants.Count == 0)
                 throw new RegistroAulaNotFoundException("Nenhum aluno foi encontrado nesta aula.");
 
-            // Os pagamentos fechados são snapshots: não mover entre competências
-            // aprovadas/pagas, nem trocar quem recebe após o fechamento.
-            const string closedSql = """
-                select exists (
-                    select 1 from public.fechamentos_professoras f
-                    where f.professora_id in (@professora_origem, @professora_destino)
-                      and f.status in ('Aprovado','Pago')
-                      and f.competencia in (
-                          date_trunc('month', @data_antiga::date)::date,
-                          date_trunc('month', @data_nova::date)::date)
-                );
-                """;
-            await using (var check = new NpgsqlCommand(closedSql, connection, transaction))
-            {
-                check.Parameters.AddWithValue("professora_origem", actualTeacher);
-                check.Parameters.AddWithValue("professora_destino", request.ProfessoraId);
-                check.Parameters.AddWithValue("data_antiga", NpgsqlDbType.Date, actualDate);
-                check.Parameters.AddWithValue("data_nova", NpgsqlDbType.Date, request.Data);
-                if (Convert.ToBoolean(await check.ExecuteScalarAsync(cancellationToken)))
-                    throw new RegistroAulaConflictException("Há fechamento aprovado/pago para uma das professoras nesse período. Solicite ajuste administrativo.");
-            }
+            // Só chegamos aqui com uma aula AGENDADA, sem presença lançada e
+            // status_pagamento=pending (ou ocorrência virtual da grade).
+            // Fechamentos mensais antigos não devem impedir mover esta aula:
+            // ela ainda não gerou crédito pago. A trigger do lote 27 impede
+            // alterações futuras se a aula for aprovada/quitada.
 
             // Trava apenas os professores/dias e alunos/dias envolvidos.
             var scheduleKeys = new HashSet<string>(StringComparer.Ordinal);
@@ -889,21 +873,9 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
             if (!await TeacherExistsAsync(connection, transaction, request.ProfessoraId, cancellationToken))
                 throw new RegistroAulaNotFoundException("A professora selecionada não foi encontrada ou está inativa.");
 
-            const string closedPeriodSql = """
-                select exists (
-                    select 1 from public.fechamentos_professoras
-                    where professora_id = @professora
-                      and competencia = date_trunc('month', @data::date)::date
-                      and status in ('Aprovado','Pago')
-                );
-                """;
-            await using (var check = new NpgsqlCommand(closedPeriodSql, connection, transaction))
-            {
-                check.Parameters.AddWithValue("professora", request.ProfessoraId);
-                check.Parameters.AddWithValue("data", NpgsqlDbType.Date, request.Data);
-                if (Convert.ToBoolean(await check.ExecuteScalarAsync(cancellationToken)))
-                    throw new RegistroAulaConflictException("O mês da professora está aprovado ou pago. Não é possível acrescentar aula retroativa sem conciliação financeira.");
-            }
+            // Aula avulsa nova começa agendada, sem crédito de pagamento.
+            // Meses com lotes já pagos aceitam novos agendamentos, mas nunca
+            // podem reabrir ou modificar automaticamente lotes passados.
 
             foreach (var alunoId in alunoIds)
             {
