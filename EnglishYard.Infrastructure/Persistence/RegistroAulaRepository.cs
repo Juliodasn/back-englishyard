@@ -555,10 +555,10 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                     select professora_id, data_aula, status, status_pagamento, eh_reposicao
                     from public.aulas where id = @id for update;
                     """;
-                await using (var command = new NpgsqlCommand(lockLessonSql, connection, transaction))
+                await using (var lockLessonCommand = new NpgsqlCommand(lockLessonSql, connection, transaction))
                 {
-                    command.Parameters.AddWithValue("id", aulaId.Value);
-                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    lockLessonCommand.Parameters.AddWithValue("id", aulaId.Value);
+                    await using var reader = await lockLessonCommand.ExecuteReaderAsync(cancellationToken);
                     if (!await reader.ReadAsync(cancellationToken))
                         throw new RegistroAulaNotFoundException("A aula original não existe mais.");
                     actualTeacher = reader.GetGuid(0);
@@ -567,11 +567,14 @@ public sealed class RegistroAulaRepository(NpgsqlDataSource dataSource) : IRegis
                         throw new RegistroAulaConflictException("Aula com resultado, reposição ou pagamento processado não pode ser remarcada.");
                 }
                 const string participantSql = "select aluno_id, status from public.aula_alunos where aula_id = @id for update;";
-                await using var command = new NpgsqlCommand(participantSql, connection, transaction);
-                command.Parameters.AddWithValue("id", aulaId.Value);
-                await using var reader2 = await command.ExecuteReaderAsync(cancellationToken);
-                while (await reader2.ReadAsync(cancellationToken))
-                    participants.Add((reader2.GetGuid(0), reader2.GetString(1)));
+                // Fechar o DataReader antes de executar novas consultas na mesma conexão.
+                await using (var participantsCommand = new NpgsqlCommand(participantSql, connection, transaction))
+                {
+                    participantsCommand.Parameters.AddWithValue("id", aulaId.Value);
+                    await using var participantsReader = await participantsCommand.ExecuteReaderAsync(cancellationToken);
+                    while (await participantsReader.ReadAsync(cancellationToken))
+                        participants.Add((participantsReader.GetGuid(0), participantsReader.GetString(1)));
+                }
                 if (participants.Count == 0 || participants.Any(x => x.Status != "agendado"))
                     throw new RegistroAulaConflictException("Uma das presenças da turma já foi lançada. Não é possível remarcar.");
                 if (participants.Select(x => x.AlunoId).Distinct().Count() != participants.Count)
