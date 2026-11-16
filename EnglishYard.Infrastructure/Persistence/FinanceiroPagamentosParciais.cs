@@ -99,9 +99,9 @@ public sealed partial class FinanceiroRepository
             creditos.TryGetValue(id, out var geradoEm);
             var legado = statusLegado == "Pago" &&
                 !PagamentosParciaisRegras.CreditoNovoAposPagamentoLegado(geradoEm, legadoPagoEm);
-            var status = quitada ? statusLote! : legado ? "Legado — verificar" : "Pendente";
-            entradas.Add(aula with { StatusQuitacao = status });
-            if (status == "Pendente") saldoAulas += aula.ValorRealizado;
+            var statusQuitacao = quitada ? statusLote! : legado ? "Legado — verificar" : "Pendente";
+            entradas.Add(aula with { StatusQuitacao = statusQuitacao });
+            if (statusQuitacao == "Pendente") saldoAulas += aula.ValorRealizado;
         }
         decimal saldoAjustes = 0m;
         foreach (var ajuste in statement.AjustesDetalhes)
@@ -115,7 +115,7 @@ public sealed partial class FinanceiroRepository
         var aprovado = (statusLegado == "Aprovado" ? valorLegado : 0m)
                        + lotes.Where(l => l.Status == "Aprovado").Sum(l => l.ValorTotal);
         var pendente = saldoAulas + saldoAjustes;
-        var status = aprovado != 0 ? "Aprovado" : pago > 0 && pendente != 0
+        var statusDemonstrativo = aprovado != 0 ? "Aprovado" : pago > 0 && pendente != 0
             ? "Pago com pendências" : pago > 0 ? "Pago" : "Em conferência";
         return statement with
         {
@@ -124,7 +124,7 @@ public sealed partial class FinanceiroRepository
             ValorAprovado = aprovado,
             ValorPendente = pendente,
             ValorTotal = PagamentosParciaisRegras.SaldoTotal(pago, aprovado, pendente),
-            StatusFechamento = status,
+            StatusFechamento = statusDemonstrativo,
             PossuiFechamentoLegado = statusLegado is "Aprovado" or "Pago",
             ValorPagoLegado = statusLegado == "Pago" ? valorLegado : 0m,
             LotesPagamento = lotes.Select(l => new LotePagamentoProfessoraResponse(
